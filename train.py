@@ -7,6 +7,7 @@ import torch
 from src.loss_func import PermutationLoss
 import torch.optim as optim
 from utils.models_sl import save_model, load_model
+from utils.visualize import visualize_stochastic_matrix
 
 from pathlib import Path
 import cv2
@@ -37,20 +38,39 @@ model = Net()
 # Initialize loss function
 criterion = PermutationLoss()
 
-LR = 2.e-5
+
+LR = 2.e-4
 BACKBONE_LR = 2.e-5
+K_LR=1.e-4
+
+
 
 model_params = model.parameters()
 
-optimizer_k = None
+backbone_ids = [id(item) for item in model.backbone_params]
+k_params = model.k_params_id
+other_params = [param for param in model.parameters() if id(param) not in k_params and id(param) not in backbone_ids]
+
+model_params = [
+    {'params': other_params},
+    {'params': model.backbone_params, 'lr': BACKBONE_LR}
+]
+k_reg_params = model.k_params
+optimizer_k = optim.Adam(k_reg_params, lr=K_LR)
+
+
 optimizer = optim.Adam(model_params, lr=LR)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+
+
+
+
 model.to(device)
 # model = DataParallel(model, device_ids=[0,1])
 
-num_epochs = 25
+num_epochs = 40
 start_epoch = 0
 
 checkpoint_path = Path("result") / 'params'
@@ -65,6 +85,8 @@ if start_epoch != 0:
     optim_path = str(checkpoint_path / 'optim_{:04}.pt'.format(start_epoch))
     if optimizer_k is not None:
         optim_k_path = str(checkpoint_path / 'optim_k_{:04}.pt'.format(start_epoch))
+        # optim_k_path=str(checkpoint_path / "optim_k.pt")
+        
 
 if len(model_path) > 0:
     print('Loading model parameters from {}'.format(model_path))
@@ -72,16 +94,26 @@ if len(model_path) > 0:
 if len(optim_path) > 0:
     print('Loading optimizer state from {}'.format(optim_path))
     optimizer.load_state_dict(torch.load(optim_path))
+    
+if len(optim_k_path) > 0:
+        try:
+            print('Loading optimizer_k state from {}'.format(optim_k_path))
+            optimizer_k.load_state_dict(torch.load(optim_k_path))
+        except FileNotFoundError:
+            print('Creating new optimizer for AFA modules')
 
-scheduler = optim.lr_scheduler.MultiStepLR(
-    optimizer,
-    milestones=[10, 20, 30],
-    gamma=0.1,
-    last_epoch=-1
-)
+if optimizer_k is not None:
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
+                                            milestones=[10, 20, 30],
+                                            gamma=0.1,
+                                            last_epoch=-1)  # cfg.TRAIN.START_EPOCH - 1
+    scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
+                                            milestones=[10, 20, 30],
+                                            gamma=0.1,
+                                            last_epoch=-1)  # cfg.TRAIN.START_EPOCH - 1
 
-# Optionally define a scheduler for optimizer_k if you have one:
-# scheduler_k = ...
+
+
 
 ### EARLY STOPPING LOGIC ###
 patience = 3                 # Number of epochs to wait for improvement
@@ -97,10 +129,6 @@ print(single_sample["id_list"])
 print(single_sample.keys())
 
 print("Kpts: ", single_sample["ns"])
-    
-
-
-
 
 
 
@@ -110,27 +138,46 @@ for epoch in range(start_epoch, num_epochs):
 
     model.train()
     
+    print('lr = ' + ', '.join(['{:.2e}'.format(x['lr']) for x in optimizer.param_groups]))
+    if optimizer_k is not None:
+        print('K_regression_lr = ' + ', '.join(['{:.2e}'.format(x['lr']) for x in optimizer_k.param_groups]))
     # Track cumulative loss within this epoch
     epoch_loss_sum = 0.0
-    num_iterations = 25  # fixed number of iterations you used
+    running_loss = 0.0
+    running_ks_loss = 0.0
+    running_ks_error = 0
+    
+    num_iterations = 100  # fixed number of iterations you used
     
     for iter_num in range(num_iterations):
         optimizer.zero_grad()
         if optimizer_k is not None:
             optimizer_k.zero_grad()
+            
+        with torch.set_grad_enabled(True):
 
-        outputs = model(single_sample)
+            outputs = model(single_sample)
         
-        # Compute the loss
-        loss = criterion(outputs['ds_mat'], outputs['gt_perm_mat'], *outputs['ns'])
+            # Compute the loss
+            loss = criterion(outputs['ds_mat'], outputs['gt_perm_mat'], *outputs['ns'])
+            
+            if 'ks_loss' in outputs:
+                    ks_loss = outputs['ks_loss']
+                    ks_error = outputs['ks_error']
+            # compute accuracy
 
         loss.backward()
+        if optimizer_k is not None:
+            ks_loss.backward()
         
         optimizer.step()
         if optimizer_k is not None:
             optimizer_k.step()
         
         epoch_loss_sum += loss.item()
+        if 'ks_loss' in outputs:
+            running_ks_loss += ks_loss
+            running_ks_error += ks_error
         
         if iter_num % 5 == 0:
             print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
@@ -148,8 +195,8 @@ for epoch in range(start_epoch, num_epochs):
     
     # LR Scheduler step
     scheduler.step()
-    # if optimizer_k is not None:
-    #     scheduler_k.step()
+    if optimizer_k is not None:
+        scheduler_k.step()
 
     ### EARLY STOPPING LOGIC ###
     if epoch_loss < best_loss:
@@ -171,7 +218,7 @@ for epoch in range(start_epoch, num_epochs):
             break
         
 
-best_model_path = str(checkpoint_path / 'best_model.pt')
+best_model_path = str(checkpoint_path / 'params_0019.pt')
 print("Loading the best model for evaluation...")
 load_model(model, best_model_path, strict=False)
 # Final step: Evaluate the model on a sample and perform matching on the original images
@@ -203,6 +250,7 @@ print("ds_mat shape:", ds_mat.shape)
 print(ds_mat)
 print("per_mat shape:", per_mat.shape)
 print(per_mat)
+visualize_stochastic_matrix(per_mat, "Perm_matrix")
 print("Number of keypoints in image0 (from kp0):", kp0.shape[0])
 print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
 

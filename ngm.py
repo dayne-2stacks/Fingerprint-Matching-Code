@@ -171,6 +171,8 @@ class Net(CNN):
         
         logger.info('%s' , data_dict['KGHs'])
         
+        # print("Number of pores: ", n_points )
+        
         # Loop through images, pores, number of pores, graphs  
         for image, point, num_p, graph in zip(images, points, n_points, graphs):
             
@@ -201,7 +203,7 @@ class Net(CNN):
             graph = self.message_pass_node_features(graph)
             orig_graph = self.build_edge_features_from_node_features(graph)
             orig_graph_list.append(orig_graph)
-            visualize_pyg_data(orig_graph)
+            # visualize_pyg_data(orig_graph)
         
             # print(image.size())
             

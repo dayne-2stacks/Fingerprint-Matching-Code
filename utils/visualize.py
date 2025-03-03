@@ -5,7 +5,7 @@ from torch_geometric.utils import to_networkx
 import seaborn as sns
 import torch
 
-def visualize_stochastic_matrix(matrix):
+def visualize_stochastic_matrix(matrix, filename="matrix"):
     """
     Visualizes a stochastic matrix using a heatmap.
     
@@ -28,7 +28,10 @@ def visualize_stochastic_matrix(matrix):
     plt.xlabel("Columns (Probability Distribution)")
     plt.ylabel("Rows")
     plt.title("Stochastic Matrix Heatmap")
-    save_name = f"photos/matrix.png"
+    
+    
+    save_name= f"photos/{filename}.png"
+  
 
     plt.savefig(save_name, bbox_inches='tight', pad_inches=0)
     plt.close()
