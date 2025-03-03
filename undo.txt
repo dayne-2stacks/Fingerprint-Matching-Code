@@ -1,0 +1,2 @@
+I changed batch number in ngm and gm dataset
+update gm dataset to select a specific pair
