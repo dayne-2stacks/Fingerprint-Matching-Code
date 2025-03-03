@@ -17,7 +17,14 @@ from utils.visualize import *
 
 import itertools
 from torch_sparse import spmm, SparseTensor
+import yaml
 
+with open("settings.yml", "r") as f:
+    config = yaml.safe_load(f)
+
+ngm_config = config.get("ngm", {})
+
+REGRESSION    = ngm_config.get("REGRESSION", True)
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +55,6 @@ SK_EPSILON=1e-10
 K_FACTOR=50.
 
 
-REGRESSION=True
 
 
 # Return as iterable combinations
