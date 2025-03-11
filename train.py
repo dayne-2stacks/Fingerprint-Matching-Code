@@ -251,7 +251,7 @@ for file in  config_files:
         scheduler.step()
         if optimizer_k is not None:
             scheduler_k.step()
-            ß
+            
     
         # EARLY STOPPING based on average loss (lower is better)
         if avg_epoch_loss < best_loss:
