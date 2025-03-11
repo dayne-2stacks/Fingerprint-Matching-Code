@@ -22,7 +22,7 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=123
-BATCH_SIZE=1
+BATCH_SIZE=4
 DATALOADER_NUM=2
 
 
@@ -87,7 +87,6 @@ class GMDataset(Dataset):
         #                                       (idx % (BATCH_SIZE * len(self.classes))) // BATCH_SIZE)
         cls_num = random.randrange(0, len(self.classes))
         ids = list(self.id_combination[cls_num][idx % self.length_list[cls_num]])
-        ids = ['R1_8_right_loop_aug_0', 'R1_8_right_loop_aug_1']
         anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
         perm_mat = perm_mat_[(0, 1)].toarray()
         while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
