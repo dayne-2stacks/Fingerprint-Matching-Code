@@ -19,15 +19,14 @@ from utils.models_sl import save_model, load_model
 from utils.visualize import visualize_stochastic_matrix
 
 start_epoch=float('inf')
-config_files = ["stage3.yml"]
-
+config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
 
 for file in  config_files:
     print("Using config ", file)
-# =====================================================
+# ====================================================
 # Load Settings from YAML Configuration File
 # =====================================================
     with open(file, "r") as f:
