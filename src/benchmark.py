@@ -1,4 +1,5 @@
 import os
+import tempfile
 import json
 from pathlib import Path
 from pygmtools.benchmark import Benchmark  # Import the original Benchmark class
@@ -56,6 +57,17 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         # Load the data dictionary from the JSON file.
         with open(self.data_path, "r") as f:
             self.data_dict = json.load(f)
+            
+        if self.sets == 'test':
+            tmpfile = tempfile.gettempdir()
+            pid_num = os.getpid()
+            cache_dir = str(pid_num) + '_gt_cache'
+            self.gt_cache_path = os.path.join(tmpfile, cache_dir)
+
+            if not os.path.exists(self.gt_cache_path):
+                os.mkdir(self.gt_cache_path)
+                print('gt perm mat cache built')
+
     
     def get_path(self, id):
         return self.data_dict[id]["path"]

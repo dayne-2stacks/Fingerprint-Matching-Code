@@ -17,9 +17,15 @@ from src.parallel import DataParallel
 from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model
 from utils.visualize import visualize_stochastic_matrix
+from src.evaluation_metric import matching_accuracy
+
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch=float('inf')
-config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
+config_files = [ "stage2.yml", "stage3.yml" ]
+
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -88,10 +94,25 @@ for file in  config_files:
         obj_resize=(320, 240),
         train_root=train_root
     )
+    
+    test_bm =  L3SFV2AugmentedBenchmark(
+        sets='test',
+        obj_resize=(320, 240),
+        train_root=train_root
+    )
+    val_bm = L3SFV2AugmentedBenchmark(
+        sets='val',
+        obj_resize=(320, 240),
+        train_root=train_root
+    )
 
     image_dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
+    test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
+    val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
 
+    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
+    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=True)
+    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=True)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -106,6 +127,7 @@ for file in  config_files:
     # Set up Optimizers (with optional separate k_optimizer)
     # =====================================================
     backbone_ids = [id(item) for item in model.backbone_params]
+    [print(item) for item in model.backbone_params]
     if K_Optimize:
         k_params = model.k_params_id
         other_params = [param for param in model.parameters() if id(param) not in k_params and id(param) not in backbone_ids]
@@ -125,13 +147,15 @@ for file in  config_files:
     # =====================================================
     # Schedulers for Both Optimizers
     # =====================================================
+    milestones=[int(0.3*num_epochs), int(0.6*num_epochs), int(0.9*num_epochs)]
+
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
-                                                milestones=[10, 20, 30],
+                                                milestones=milestones,
                                                 gamma=LR_DECAY,
                                                 last_epoch=-1)
     if optimizer_k is not None:
         scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
-                                                    milestones=[10, 20, 30],
+                                                    milestones=milestones,
                                                     gamma=LR_DECAY,
                                                     last_epoch=-1)
 
@@ -167,7 +191,6 @@ for file in  config_files:
             print("No optimizer_k checkpoint found; starting fresh for AFA modules.")
 
 
-
     # =====================================================
     # Training Loop
     # =====================================================
@@ -186,89 +209,140 @@ for file in  config_files:
         running_ks_loss = 0.0
         running_ks_error = 0.0
         
-        for iter_num in range(num_iterations):
+        
+        iter_num = 0
+        for batch in dataloader:
+            batch_num = batch['batch_size']
+            iter_num += 1
+            batch = data_to_cuda(batch)
             # =====================================================
             # Fetch a Single Sample (for repeated training iterations)
             # =====================================================
-            single_sample = next(iter(dataloader))
-            single_sample = data_to_cuda(single_sample)
+            # single_sample = next(iter(dataloader))
+            # single_sample = data_to_cuda(single_sample)
             # print(single_sample["id_list"])
             # print(single_sample.keys())
             # print("Kpts:", single_sample["ns"])
             
             
-            
-            
+        
+            # Zero the parameter gradients 
             optimizer.zero_grad()
             if optimizer_k is not None:
                 optimizer_k.zero_grad()
             
-            outputs = model(single_sample)
+            outputs = model(batch)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             
+            
+            
             # Combine losses in one backward pass
-            if "ks_loss" in outputs and K_Optimize:
-                ks_loss = outputs["ks_loss"]
-                running_ks_loss += ks_loss.item()
-                running_ks_error += outputs.get("ks_error", 0).item() if "ks_error" in outputs else 0.0
-                loss.backward()
-                ks_loss.backward()
-                optimizer.step()
-                optimizer_k.step()
+            ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+            ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+            if isinstance(ks_loss, torch.Tensor):
+                running_ks_loss += ks_loss.item() 
             else:
-                loss.backward()
-                optimizer.step()
+                running_ks_loss += ks_loss  # Use directly if already a float
+            if isinstance(ks_error, torch.Tensor):
+                    running_ks_error += ks_error.item() 
+            else:
+                running_ks_error += ks_error  # Use directly if already a float
+            
+            total_loss = loss + ks_loss
+            total_loss.backward()
+            optimizer.step()
+            if optimizer_k is not None:
+                optimizer_k.step()
+            
+
+                
+             # compute accuracy
+            acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+          
             
             epoch_loss_sum += loss.item()
             
          
             if iter_num % 5 == 0:
                 if "ks_loss" in outputs and K_Optimize:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}".format(
-                        epoch, iter_num, loss.item(), ks_loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
+                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
+                        epoch, iter_num, loss.item(), ks_loss, total_loss.item()))
+                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss:.4f}")
                     
                 else:
                     print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
                         epoch, iter_num, loss.item()))
                     logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
                     
-        avg_epoch_loss = epoch_loss_sum / num_iterations
+        avg_epoch_loss = epoch_loss_sum / iter_num 
             
             
         print("==> End of Epoch {}, average loss = {:.4f}, total ks_loss = {:.4f}".format(
-            epoch, avg_epoch_loss, running_ks_loss/num_iterations))
-        logger.info(f"==> End of Epoch {epoch}, Average Loss: {avg_epoch_loss:.4f}, Total ks_loss: {running_ks_loss/num_iterations:.4f}")
+            epoch, avg_epoch_loss, running_ks_loss/iter_num))
+        logger.info(f"==> End of Epoch {epoch}, Average Loss: {avg_epoch_loss:.4f}, Total ks_loss: {running_ks_loss/iter_num:.4f}")
 
         # Save checkpoints for model, optimizer, and optimizer_k
         save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
         torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
         if optimizer_k is not None:
             torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+            
+        # =====================================================
+        # ---- Validation after each epoch ----
+        # =====================================================
+        model.eval()
+        val_loss_sum = 0.0
+        with torch.no_grad():
+            for batch in val_dataloader:
+                batch = data_to_cuda(batch)
+                outputs = model(batch)
+                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                # Combine losses in one backward pass
+                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+                ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+                print("Ks loss: ", ks_loss)
+                print("loss: ", loss)
+                
+                val_loss_sum += loss + 4000 * ks_loss
+                
+        avg_val_loss = val_loss_sum.item() / len(val_dataloader)
+        print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
+        # compute accuracy
+        acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+        print("Accuracy: ", acc)
         
+        # Save best model based on validation loss, implement early stopping, etc.
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            no_improvement_count = 0
+            best_model_path = str(checkpoint_path / "best_model.pt")
+            save_model(model, best_model_path)
+            with open(start_file, "w") as f:
+                json.dump({"start_epoch": epoch + 1}, f)
+        else:
+            no_improvement_count += 1
+            print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(no_improvement_count, best_loss))
+            if no_improvement_count >= patience:
+                print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
+                break
+
         # Step LR schedulers
         scheduler.step()
         if optimizer_k is not None:
             scheduler_k.step()
-            
-    
-        # EARLY STOPPING based on average loss (lower is better)
-        if avg_epoch_loss < best_loss:
-            best_loss = avg_epoch_loss
-            no_improvement_count = 0
-            with open(start_file, "w") as f:
-                json.dump({"start_epoch": epoch + 1}, f)
-            best_model_path = str(checkpoint_path / "best_model.pt")
-            save_model(model, best_model_path)
-        else:
-            no_improvement_count += 1
-            print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(
-                no_improvement_count, best_loss))
-            if no_improvement_count >= patience:
-                print("Stopping early at epoch {} due to no improvement for {} epochs.".format(
-                    epoch + 1, patience))
-                
-                break
+        
+        # ---- Test Evaluation Periodically ----
+        if epoch % 10 == 0:
+            model.eval()
+            test_loss_sum = 0.0
+            with torch.no_grad():
+                for batch in test_dataloader:
+                    batch = data_to_cuda(batch)
+                    outputs = model(batch)
+                    loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                    test_loss_sum += loss.item()
+            avg_test_loss = test_loss_sum / len(test_dataloader)
+            print("Epoch {}: Test Loss = {:.4f}".format(epoch, avg_test_loss))
 
 # =====================================================
 # Load Best Model and Evaluate on a Sample
