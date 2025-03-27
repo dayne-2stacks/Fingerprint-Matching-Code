@@ -8,6 +8,8 @@ import random
 from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
+import cv2
+from utils.augmentation import augment_image
 
 
 
@@ -43,8 +45,8 @@ class GMDataset(Dataset):
         self.problem_type = problem
         self.img_num_list = self.bm.compute_img_num(self.classes[0])
 
-     
-        self.id_combination, self.length = self.bm.get_id_combination(self.cls)
+        # Updated to only get one image
+        self.id_combination, self.length = self.bm.get_id_combination(self.cls, num=1)
         self.length_list = []
         for cls in self.classes:
             cls_length = self.bm.compute_length(cls)
@@ -85,13 +87,48 @@ class GMDataset(Dataset):
     def get_pair(self, idx, cls):
         #anno_pair, perm_mat = self.bm.get_pair(self.cls if self.cls is not None else
         #                                       (idx % (BATCH_SIZE * len(self.classes))) // BATCH_SIZE)
+        # select a random class
         cls_num = random.randrange(0, len(self.classes))
+        # Get 2 ids from the selected class
         ids = list(self.id_combination[cls_num][idx % self.length_list[cls_num]])
+        # Get data from json file about pair
         anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
-        perm_mat = perm_mat_[(0, 1)].toarray()
-        while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
-            anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
-            perm_mat = perm_mat_[(0, 1)].toarray()
+        
+        
+        # Get oone of the images (There will only be one since using original dataset)
+        # Load original image and annotations
+        original_img = cv2.imread(anno_pair[0]['path'])
+        original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+        
+        # Generate two distinct augmented versions of the same image
+        img1, annos1 = augment_image(original_img, original_annos)
+        img2, annos2 = augment_image(original_img, original_annos)
+        
+        # Find common keypoints (by label)
+        labels1 = set(a[0] for a in annos1)
+        labels2 = set(a[0] for a in annos2)
+        common_labels = labels1.intersection(labels2)
+
+        # Update annotations: if a keypoint is not common, change its label to "outlier"
+        annos1_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos1]
+        annos2_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos2]
+        
+        # Filter annotations for common keypoints
+        annos1_filtered = [a for a in annos1 if a[0] in common_labels]
+        annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+
+        # Create permutation matrix based on matching labels
+        sorted_labels = sorted(common_labels)
+        label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
+        n_common = len(common_labels)
+        perm_mat = np.eye(n_common)
+
+
+        # create permutation pair
+        # perm_mat = perm_mat_[(0, 1)].toarray()
+        # while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
+        #     anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
+        #     perm_mat = perm_mat_[(0, 1)].toarray()
 
         cls = [anno['cls'] for anno in anno_pair]
         P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
@@ -102,8 +139,12 @@ class GMDataset(Dataset):
 
         P1 = np.array(P1)
         P2 = np.array(P2)
+        
+         # Build graphs for each augmented image
+        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
+        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
 
-        A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+        A1, G1, H1, e1 = build_graphs(P1, len(P1), stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
             G2 = perm_mat.transpose().dot(G1)
             H2 = perm_mat.transpose().dot(H1)
@@ -112,8 +153,11 @@ class GMDataset(Dataset):
         else:
             A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
 
+
         pyg_graph1 = self.to_pyg_graph(A1, P1)
         pyg_graph2 = self.to_pyg_graph(A2, P2)
+        
+        
 
         ret_dict = {'Ps': [torch.Tensor(x) for x in [P1, P2]],
                     'ns': [torch.tensor(x) for x in [n1, n2]],
@@ -125,10 +169,10 @@ class GMDataset(Dataset):
                     'pyg_graphs': [pyg_graph1, pyg_graph2],
                     'cls': [str(x) for x in cls],
                     'id_list': id_list,
-                    'univ_size': [torch.tensor(int(x)) for x in univ_size],
+                    'univ_size': torch.tensor(n_common),
                     }
 
-        imgs = [anno['img'] for anno in anno_pair]
+        imgs = [img1, img2]
         if imgs[0] is not None:
             trans = transforms.Compose([
                     transforms.ToTensor(),
@@ -136,10 +180,10 @@ class GMDataset(Dataset):
                     ])
             imgs = [trans(img) for img in imgs]
             ret_dict['images'] = imgs
-        elif 'feat' in anno_pair[0]['kpts'][0]:
-            feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
-            feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
-            ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
+        # elif 'feat' in anno_pair[0]['kpts'][0]:
+        #     feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
+        #     feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
+        #     ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
 
         return ret_dict
 
