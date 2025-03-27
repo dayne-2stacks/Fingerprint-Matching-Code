@@ -41,12 +41,12 @@ SK_EMB=1
 GNN_FEAT = [16, 16, 16]
 GNN_LAYER = 3
 EDGE_EMB=False
-BATCH_SIZE=4
+BATCH_SIZE=8
 
 UNIV_SIZE=400
 SK_ITER_NUM=10
 SK_EPSILON=1e-10
-K_FACTOR=50.
+K_FACTOR=5.
 
 
 
@@ -122,8 +122,8 @@ class Net(CNN):
         self.mean_k = True
         self.trainings=True
         
+        self.k_params_id = []
         if self.regression:
-            self.k_params_id = []
             # Only implementing AFAU
             self.encoder_k = Encoder()
             self.k_params_id += [id(item) for item in self.encoder_k.parameters()]
