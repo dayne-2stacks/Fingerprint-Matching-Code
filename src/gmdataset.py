@@ -131,18 +131,17 @@ class GMDataset(Dataset):
         #     perm_mat = perm_mat_[(0, 1)].toarray()
 
         cls = [anno['cls'] for anno in anno_pair]
-        P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
-        P2 = [(kp['x'], kp['y']) for kp in anno_pair[1]['kpts']]
+        # Build graphs for each augmented image
+        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
+        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
 
-        n1, n2 = len(P1), len(P2)
+        n1, n2 = len(annos1_filtered), len(annos2_filtered)
+
         univ_size = [anno['univ_size'] for anno in anno_pair]
 
         P1 = np.array(P1)
         P2 = np.array(P2)
-        
-         # Build graphs for each augmented image
-        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
-        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
+    
 
         A1, G1, H1, e1 = build_graphs(P1, len(P1), stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
