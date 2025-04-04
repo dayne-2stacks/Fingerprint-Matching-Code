@@ -38,7 +38,7 @@ class GMDataset(Dataset):
         self.cls = None if cls in ['none', 'all'] else cls
 
         if self.cls is None:
-            self.classes = self.bm.classes
+            self.classes = self.bm.classes # This is 148
         else:
             self.classes = [self.cls]
 
@@ -95,15 +95,21 @@ class GMDataset(Dataset):
         anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
         
         
-        # Get oone of the images (There will only be one since using original dataset)
+        # Get one of the images (There will only be one since using original dataset)
         # Load original image and annotations
-        original_img = cv2.imread(anno_pair[0]['path'])
+        
+        original_img = cv2.imread(self.bm.get_path(f"{anno_pair[0]['cls']}"))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
         # Generate two distinct augmented versions of the same image
         img1, annos1 = augment_image(original_img, original_annos)
         img2, annos2 = augment_image(original_img, original_annos)
         
+        # save_path_1 = f"augmented_pair_{idx}_1.jpg"
+        # save_path_2 = f"augmented_pair_{idx}_2.jpg"
+        # cv2.imwrite(save_path_1, img1)
+        # cv2.imwrite(save_path_2, img2)
+            
         # Find common keypoints (by label)
         labels1 = set(a[0] for a in annos1)
         labels2 = set(a[0] for a in annos2)
@@ -121,7 +127,7 @@ class GMDataset(Dataset):
         sorted_labels = sorted(common_labels)
         label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
         n_common = len(common_labels)
-        perm_mat = np.eye(n_common)
+        perm_mat = np.eye(n_common, dtype=np.float32)
 
 
         # create permutation pair
@@ -155,6 +161,39 @@ class GMDataset(Dataset):
 
         pyg_graph1 = self.to_pyg_graph(A1, P1)
         pyg_graph2 = self.to_pyg_graph(A2, P2)
+        
+        
+        
+        # ---------------------------------Visualize Matches---------------------------
+        # Make copies so we don't overwrite the original augmented images
+        # img1_vis = img1.copy()
+        # img2_vis = img2.copy()
+
+        # # Draw circles for each pore in img1 and img2
+        # for (x, y) in P1:
+        #     cv2.circle(img1_vis, (int(x), int(y)), 5, (0, 255, 0), -1)  # green circles
+        # for (x, y) in P2:
+        #     cv2.circle(img2_vis, (int(x), int(y)), 5, (255, 0, 0), -1)  # blue circles
+
+        # # Concatenate side by side
+        # # shape = (H, W, 3). Ensure both images have same height
+        # matched_image = np.concatenate([img1_vis, img2_vis], axis=1)
+
+        # # Now, if you want to draw lines showing which pore in P1 matches which in P2:
+        # offset_x = img1_vis.shape[1]  # The width of the first image
+        # for i in range(len(P1)):
+        #     # Because you used perm_mat = np.eye(n_common), 
+        #     # index i in P1 is matched with index i in P2.
+        #     (x1, y1) = P1[i]
+        #     (x2, y2) = P2[i]
+        #     x1, y1 = int(x1), int(y1)
+        #     x2, y2 = int(x2) + offset_x, int(y2)  # shift x2 by the offset
+        #     cv2.line(matched_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+        # # You can save or store matched_image in your return dict
+        # save_matched = f"augmented_pair_{idx}_matched.jpg"
+        # cv2.imwrite(save_matched, matched_image)
+
         
         
 
@@ -223,8 +262,6 @@ class QAPDataset(Dataset):
 def collate_fn(data: list):
     """
     Create mini-batch data for training.
-    :param data: data dict
-    :return: mini-batch
     """
     def pad_tensor(inp):
         assert type(inp[0]) == torch.Tensor
@@ -239,15 +276,12 @@ def collate_fn(data: list):
             except StopIteration:
                 break
         max_shape = np.array(max_shape)
-
         padded_ts = []
         for t in inp:
             pad_pattern = np.zeros(2 * len(max_shape), dtype=np.int64)
             pad_pattern[::-2] = max_shape - np.array(t.shape)
-            #pad_pattern = torch.from_numpy(np.asfortranarray(pad_pattern))
             pad_pattern = tuple(pad_pattern.tolist())
             padded_ts.append(F.pad(t, pad_pattern, 'constant', 0))
-
         return padded_ts
 
     def stack(inp):
@@ -268,15 +302,10 @@ def collate_fn(data: list):
         elif type(inp[0]) == np.ndarray:
             new_t = pad_tensor([torch.from_numpy(x) for x in inp])
             ret = torch.stack(new_t, 0)
-        elif type(inp[0]) == pyg.data.Data:
+        elif isinstance(inp[0], pyg.data.Data):
             ret = pyg.data.Batch.from_data_list(inp)
-        elif type(inp[0]) == str:
-            ret = inp
-        elif type(inp[0]) == tuple:
-            ret = inp
-
         else:
-            raise ValueError('Cannot handle type {}'.format(type(inp[0])))
+            ret = inp
         return ret
 
     ret = stack(data)
@@ -320,7 +349,7 @@ def collate_fn(data: list):
             ret['KGHs'] = K1G, K1H
         else:
             raise ValueError('Data type not understood.')
-
+        
     if 'Fi' in ret and 'Fj' in ret:
         Fi = ret['Fi']
         Fj = ret['Fj']
@@ -328,13 +357,17 @@ def collate_fn(data: list):
         ret['aff_mat'] = aff_mat
 
     ret['batch_size'] = len(data)
-    ret['univ_size'] = torch.tensor([max(*[item[b] for item in ret['univ_size']]) for b in range(ret['batch_size'])])
-
+    # For univ_size, if it's a list of scalar tensors, stack them.
+    if isinstance(ret['univ_size'], list):
+        ret['univ_size'] = torch.stack(ret['univ_size'])
     for v in ret.values():
-        if type(v) is list:
+        if isinstance(v, list):
             ret['num_graphs'] = len(v)
             break
-
+    ret['batch_size'] = len(data)
+    # For univ_size, stack scalar tensors
+    if isinstance(ret['univ_size'], list):
+        ret['univ_size'] = torch.stack(ret['univ_size'])
     return ret
 
 

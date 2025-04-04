@@ -19,12 +19,13 @@ from utils.models_sl import save_model, load_model
 from utils.visualize import visualize_stochastic_matrix
 from src.evaluation_metric import matching_accuracy
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-config_files = [ "stage2.yml","stage3.yml"]
-#config_files = ["stage3.yml"]
+config_files = ["stage1.yml", "stage2.yml","stage3.yml"]
+# config_files = ["stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -72,7 +73,7 @@ for file in config_files:
     no_improvement_count = 0
 
     # File paths
-    train_root = '/green/data/L3SF_V2/L3SF_V2_Augmented'
+    train_root = 'dataset/Synthetic'
     OUTPUT_PATH = "result"
     PRETRAINED_PATH = ""  # Set this to a pretrained model path if needed
 
@@ -297,7 +298,7 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             iter_num += 1
             batch = data_to_cuda(batch)
             
@@ -307,6 +308,15 @@ for file in config_files:
                 optimizer_k.zero_grad()
             
             outputs = model(batch)
+            
+            
+            # -------------- Check ds mat ---------------------
+            # Print a summary of the outputs to see if they vary across iterations
+            ds_mat = outputs["ds_mat"]
+            print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
+            # -------------- Check ds mat ---------------------
+            
+
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
@@ -318,7 +328,18 @@ for file in config_files:
             total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
             
             
-            total_loss.backward()    
+            total_loss.backward()  
+            
+            # Check gradients: iterate over model parameters and print norm of gradients
+            grad_norms = []
+            for name, param in model.named_parameters():
+                if param.grad is not None and "classifier" in name:
+                    grad_norm = param.grad.data.norm().item()
+                    grad_norms.append((name, grad_norm))
+            print(f"Iteration {batch_idx}: Gradient norms: {grad_norms}") 
+            # Check gradients: iterate over model parameters and print norm of gradients
+            
+             
             optimizer.step()
             if optimizer_k is not None:
                 optimizer_k.step()
@@ -360,15 +381,18 @@ for file in config_files:
         model.eval()
         val_loss_sum = 0.0
         val_ks_sum = 0.0
-        
+        val_num=0
         with torch.no_grad():
             for batch in val_dataloader:
+                val_num+=1
                 batch = data_to_cuda(batch)
                 outputs = model(batch)
                 loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
                 ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-                print("Validation - ks_loss: ", ks_loss)
-                print("Validation - loss: ", loss)
+                
+                if val_num % 5 == 0:
+                    print("Validation - ks_loss: ", ks_loss)
+                    print("Validation - loss: ", loss)
                 # Sum without scaling
                 # if stage == 2 or stage ==3:
                 #     val_loss_sum += (ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss)
