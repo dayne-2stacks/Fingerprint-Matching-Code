@@ -24,8 +24,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-config_files = ["stage1.yml", "stage2.yml","stage3.yml"]
-# config_files = ["stage3.yml"]
+# config_files = ["stage1.yml", "stage2.yml","stage3.yml"]
+config_files = ["stage2.yml","stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -227,13 +227,13 @@ for file in config_files:
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
     if optimizer_k is not None:
         # scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=2, factor=0.5)
+        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=5, factor=0.5)
 
     # =====================================================
     # Checkpoint Loading (if start_epoch > 0)
@@ -498,10 +498,12 @@ for i in range(ds_mat.shape[0]):
         distance_value = distance_value.flatten()[0]
     distance = float(distance_value)
     matches.append(cv2.DMatch(_queryIdx=i, _trainIdx=best_index, _imgIdx=0, _distance=distance))
+    
+print(single_sample["id_list"])
 
 if "id_list" in single_sample:
     img0 = cv2.imread(benchmark.get_path(single_sample["id_list"][0][0]))
-    img1 = cv2.imread(benchmark.get_path(single_sample["id_list"][1][0]))
+    img1 = cv2.imread(benchmark.get_path(single_sample["id_list"][0][1]))
 else:
     img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
     img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
