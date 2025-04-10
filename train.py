@@ -24,8 +24,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-# config_files = ["stage1.yml", "stage2.yml","stage3.yml"]
-config_files = ["stage2.yml","stage3.yml"]
+config_files = ["stage3.yml"]
+# config_files = ["stage1.yml","stage2.yml","stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -147,7 +147,7 @@ for file in config_files:
        
         # In stage 1 we do not optimize the k_params
         K_Optimize = False
-
+        k_iter_num=1
     elif stage == 2:
         print("Stage 2: Freezing all parameters except k_params (which are unfrozen).")
         # Freeze all parameters first
@@ -201,6 +201,7 @@ for file in config_files:
         # In stage 2, only k_params are trainable.
         optimizer = optim.Adam(model_params, lr=LR)
         optimizer_k = optim.Adam(model.k_params, lr=K_LR)
+        k_iter_num=0
     elif stage == 3:
         # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -300,6 +301,8 @@ for file in config_files:
         iter_num = 0
         for batch_idx, batch in enumerate(dataloader):
             iter_num += 1
+            if K_Optimize:
+                k_iter_num +=1
             batch = data_to_cuda(batch)
             
             # Zero the parameter gradients 
@@ -311,9 +314,9 @@ for file in config_files:
             
             
             # -------------- Check ds mat ---------------------
-            # Print a summary of the outputs to see if they vary across iterations
-            ds_mat = outputs["ds_mat"]
-            print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
+            # # Print a summary of the outputs to see if they vary across iterations
+            # ds_mat = outputs["ds_mat"]
+            # print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
             # -------------- Check ds mat ---------------------
             
 
@@ -331,12 +334,12 @@ for file in config_files:
             total_loss.backward()  
             
             # Check gradients: iterate over model parameters and print norm of gradients
-            grad_norms = []
-            for name, param in model.named_parameters():
-                if param.grad is not None and "classifier" in name:
-                    grad_norm = param.grad.data.norm().item()
-                    grad_norms.append((name, grad_norm))
-            print(f"Iteration {batch_idx}: Gradient norms: {grad_norms}") 
+            # grad_norms = []
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None and "classifier" in name:
+            #         grad_norm = param.grad.data.norm().item()
+            #         grad_norms.append((name, grad_norm))
+            # print(f"Iteration {batch_idx}: Gradient norms: {grad_norms}") 
             # Check gradients: iterate over model parameters and print norm of gradients
             
              
@@ -361,13 +364,13 @@ for file in config_files:
                         epoch, iter_num, loss.item()))
                     logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
                     
-        if K_Optimize:
-            avg_epoch_loss = running_ks_loss / num_iterations    
-        else:        
-            avg_epoch_loss = epoch_loss_sum /iter_num 
+        # if K_Optimize:
+        #     avg_epoch_loss = running_ks_loss / num_iterations    
+        # else:        
+        avg_epoch_loss = epoch_loss_sum /iter_num 
         print("==> End of Epoch {}, average total loss = {:.4f}, average ks_loss = {:.4f}".format(
             epoch, avg_epoch_loss, running_ks_loss/iter_num))
-        logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/iter_num:.4f}")
+        logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/k_iter_num:.4f}")
 
         # Save checkpoints for model, optimizer, and optimizer_k
         save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
@@ -428,9 +431,57 @@ for file in config_files:
                 break
 
         # Step LR schedulers
+        # Initialize previous learning rates on first epoch
+        if epoch == start_epoch:
+            prev_lr = [group['lr'] for group in optimizer.param_groups]
+            if optimizer_k is not None:
+                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
+
+        # Step LR schedulers
+        # scheduler.step(avg_val_loss)
+        # if optimizer_k is not None:
+        #     scheduler_k.step(avg_val_loss)
+        
         scheduler.step(avg_val_loss)
         if optimizer_k is not None:
-            scheduler_k.step(avg_ks_loss)
+            scheduler_k.step(avg_val_loss)
+
+        # Detect LR reduction for main optimizer
+        curr_lr = [group['lr'] for group in optimizer.param_groups]
+        lr_reduced = any(clr < plr for clr, plr in zip(curr_lr, prev_lr))
+        prev_lr = curr_lr  # Update previous for next iteration
+
+        if lr_reduced:
+            print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
+            best_model_path = str(checkpoint_path / "best_model.pt")
+            load_model(model, best_model_path, strict=False)
+            
+            optim_path = str(checkpoint_path / f"optim_{epoch + 1:04}.pt")
+            if os.path.exists(optim_path):
+                print("Reloading optimizer state from", optim_path)
+                # Save current (reduced) learning rates
+                current_lr = [group['lr'] for group in optimizer.param_groups]
+                if optimizer_k is not None:
+                    current_lr_k = [group['lr'] for group in optimizer_k.param_groups]
+                
+                # Load optimizer state from checkpoint
+                state = torch.load(optim_path)
+                optimizer.load_state_dict(state)
+                # Restore current lr values
+                for group, lr in zip(optimizer.param_groups, current_lr):
+                    group['lr'] = lr
+                
+                # For optimizer_k, load the same state and restore its learning rates
+                if optimizer_k is not None:
+                    state = torch.load(optim_k_path)
+                    print("Reloading optimizer_k state from", optim_k_path)
+                    optimizer_k.load_state_dict(state)
+                    for group, lr in zip(optimizer_k.param_groups, current_lr_k):
+                        group['lr'] = lr
+            else:
+                print("Optimizer checkpoint not found for reloading.")
+
+
         
         # ---- Test Evaluation Periodically ----
         if epoch % 10 == 0:
@@ -499,18 +550,40 @@ for i in range(ds_mat.shape[0]):
     distance = float(distance_value)
     matches.append(cv2.DMatch(_queryIdx=i, _trainIdx=best_index, _imgIdx=0, _distance=distance))
     
-print(single_sample["id_list"])
+print(len(single_sample["images"]))
 
 if "id_list" in single_sample:
-    img0 = cv2.imread(benchmark.get_path(single_sample["id_list"][0][0]))
-    img1 = cv2.imread(benchmark.get_path(single_sample["id_list"][0][1]))
+    img0 = single_sample["images"][0][0]
+    img1 = single_sample["images"][0][1]
 else:
     img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
     img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
     print("Using fallback image paths.")
 
+def to_grayscale_cv2_image(tensor):
+    """
+    Converts a grayscale torch tensor to a valid OpenCV image.
+    """
+    # Step 1: Ensure on CPU and detach from graph
+    tensor = tensor.detach().cpu()
+
+    # Step 2: Convert from CHW → HWC
+    image = tensor.permute(1, 2, 0).numpy()  # shape now (240, 320, 3)
+
+    # Step 3: Scale to [0, 255] and convert to uint8
+    image = (image * 255).astype(np.uint8)
+
+    # Step 4: Convert RGB → Grayscale for OpenCV
+    gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    return gray_image
+
+
+img0= to_grayscale_cv2_image(img0)
+img1 = to_grayscale_cv2_image(img1)
+
 cv2_kp0 = []
-for kp in kp0:
+for kp in kp0: 
     x = float(np.array(kp[0]).flatten()[0])
     y = float(np.array(kp[1]).flatten()[0])
     cv2_kp0.append(cv2.KeyPoint(x=x, y=y, size=1))
