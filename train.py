@@ -340,10 +340,8 @@ for file in config_files:
                         epoch, iter_num, loss.item()))
                     logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
                     
-        if K_Optimize:
-            avg_epoch_loss = running_ks_loss / num_iterations    
-        else:        
-            avg_epoch_loss = epoch_loss_sum /iter_num 
+          
+        avg_epoch_loss = epoch_loss_sum /iter_num 
         print("==> End of Epoch {}, average total loss = {:.4f}, average ks_loss = {:.4f}".format(
             epoch, avg_epoch_loss, running_ks_loss/iter_num))
         logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/iter_num:.4f}")
@@ -357,40 +355,40 @@ for file in config_files:
         # =====================================================
         # ---- Validation after each epoch ----
         # =====================================================
-        model.eval()
-        val_loss_sum = 0.0
-        val_ks_sum = 0.0
+        # model.eval()
+        # val_loss_sum = 0.0
+        # val_ks_sum = 0.0
         
-        with torch.no_grad():
-            for batch in val_dataloader:
-                batch = data_to_cuda(batch)
-                outputs = model(batch)
-                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-                print("Validation - ks_loss: ", ks_loss)
-                print("Validation - loss: ", loss)
-                # Sum without scaling
-                # if stage == 2 or stage ==3:
-                #     val_loss_sum += (ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss)
-                # else: 
-                val_loss_sum += loss.item()
-                if optimizer_k is not None:
-                    val_ks_sum += ks_loss.item()
-                else:
-                    val_ks_sum += ks_loss
+        # with torch.no_grad():
+        #     for batch in val_dataloader:
+        #         batch = data_to_cuda(batch)
+        #         outputs = model(batch)
+        #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+        #         ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+        #         print("Validation - ks_loss: ", ks_loss)
+        #         print("Validation - loss: ", loss)
+        #         # Sum without scaling
+        #         # if stage == 2 or stage ==3:
+        #         #     val_loss_sum += (ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss)
+        #         # else: 
+        #         val_loss_sum += loss.item()
+        #         if optimizer_k is not None:
+        #             val_ks_sum += ks_loss.item()
+        #         else:
+        #             val_ks_sum += ks_loss
                 
                 
                 
-        avg_val_loss = val_loss_sum / len(val_dataloader)
-        avg_ks_loss = ks_loss / len(val_dataloader)
-        print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
-        # Compute accuracy on the last batch of validation (for example)
-        acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-        print("Validation Accuracy: ", acc)
+        # avg_val_loss = val_loss_sum / len(val_dataloader)
+        # avg_ks_loss = ks_loss / len(val_dataloader)
+        # print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
+        # # Compute accuracy on the last batch of validation (for example)
+        # acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+        # print("Validation Accuracy: ", acc)
         
         # Save best model based on validation loss and update checkpoint file
-        if avg_val_loss < best_loss:
-            best_loss = avg_val_loss
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
             no_improvement_count = 0
             best_model_path = str(checkpoint_path / "best_model.pt")
             save_model(model, best_model_path)
@@ -403,10 +401,58 @@ for file in config_files:
                 print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
                 break
 
+                # Step LR schedulers
+        # Initialize previous learning rates on first epoch
+        if epoch == start_epoch:
+            prev_lr = [group['lr'] for group in optimizer.param_groups]
+            if optimizer_k is not None:
+                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
+
         # Step LR schedulers
-        scheduler.step(avg_val_loss)
+        # scheduler.step(avg_val_loss)
+        # if optimizer_k is not None:
+        #     scheduler_k.step(avg_val_loss)
+        
+        scheduler.step(avg_epoch_loss)
         if optimizer_k is not None:
-            scheduler_k.step(avg_ks_loss)
+            scheduler_k.step(avg_epoch_loss)
+
+        # Detect LR reduction for main optimizer
+        curr_lr = [group['lr'] for group in optimizer.param_groups]
+        lr_reduced = any(clr < plr for clr, plr in zip(curr_lr, prev_lr))
+        prev_lr = curr_lr  # Update previous for next iteration
+
+        if lr_reduced:
+            print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
+            best_model_path = str(checkpoint_path / "best_model.pt")
+            load_model(model, best_model_path, strict=False)
+            
+            optim_path = str(checkpoint_path / f"optim_{epoch + 1:04}.pt")
+            if os.path.exists(optim_path):
+                print("Reloading optimizer state from", optim_path)
+                # Save current (reduced) learning rates
+                current_lr = [group['lr'] for group in optimizer.param_groups]
+                if optimizer_k is not None:
+                    current_lr_k = [group['lr'] for group in optimizer_k.param_groups]
+                
+                # Load optimizer state from checkpoint
+                state = torch.load(optim_path)
+                optimizer.load_state_dict(state)
+                # Restore current lr values
+                for group, lr in zip(optimizer.param_groups, current_lr):
+                    group['lr'] = lr
+                
+                # For optimizer_k, load the same state and restore its learning rates
+                if optimizer_k is not None:
+                    state = torch.load(optim_k_path)
+                    print("Reloading optimizer_k state from", optim_k_path)
+                    optimizer_k.load_state_dict(state)
+                    for group, lr in zip(optimizer_k.param_groups, current_lr_k):
+                        group['lr'] = lr
+            else:
+                print("Optimizer checkpoint not found for reloading.")
+
+
         
         # ---- Test Evaluation Periodically ----
         if epoch % 10 == 0:
