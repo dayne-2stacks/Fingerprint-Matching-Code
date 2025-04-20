@@ -23,8 +23,8 @@ from src.evaluation_metric import matching_accuracy
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-config_files = [ "stage2.yml","stage3.yml"]
-#config_files = ["stage3.yml"]
+# config_files = [ "stage1.yml", "stage2.yml","stage3.yml"]
+config_files = ["stage1.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -226,13 +226,13 @@ for file in config_files:
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
     if optimizer_k is not None:
         # scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=2, factor=0.5)
+        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=10, factor=0.5)
 
     # =====================================================
     # Checkpoint Loading (if start_epoch > 0)
@@ -273,6 +273,7 @@ for file in config_files:
         print("Epoch {}/{}".format(epoch, start_epoch + num_epochs - 1))
         print("-" * 10)
         
+        
         if start_epoch == epoch:
             for param_group in optimizer.param_groups:
                 if 'lr' in param_group:
@@ -297,50 +298,53 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for batch in dataloader:
-            iter_num += 1
-            batch = data_to_cuda(batch)
+        for i in range(50):
+            for batch in dataloader:
+                iter_num += 1
+                batch = data_to_cuda(batch)
+                
+                # Zero the parameter gradients 
+                optimizer.zero_grad()
+                if optimizer_k is not None:
+                    optimizer_k.zero_grad()
+                
+                outputs = model(batch)
+                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+                ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+                
+                # Accumulate ks_loss for logging
+                running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
+                running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
+                
+                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
+                
+                
+                total_loss.backward()    
+                optimizer.step()
+                if optimizer_k is not None:
+                    optimizer_k.step()
+                
+                # Compute accuracy (if desired)
+                acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+                
+                print("Accuracy", acc)
+                
+                
+                # Sum the total loss (loss + ks_loss) for epoch reporting
+                epoch_loss_sum += loss.item()
+                
+                if iter_num % 5 == 0:
+                    if "ks_loss" in outputs and optimizer_k is not None:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
+                            epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
+                    else:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
+                            epoch, iter_num, loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
+                        
             
-            # Zero the parameter gradients 
-            optimizer.zero_grad()
-            if optimizer_k is not None:
-                optimizer_k.zero_grad()
-            
-            outputs = model(batch)
-            loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-            ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
-            
-            # Accumulate ks_loss for logging
-            running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-            running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
-            
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
-            
-            
-            total_loss.backward()    
-            optimizer.step()
-            if optimizer_k is not None:
-                optimizer_k.step()
-            
-            # Compute accuracy (if desired)
-            acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-            
-            
-            # Sum the total loss (loss + ks_loss) for epoch reporting
-            epoch_loss_sum += loss.item()
-            
-            if iter_num % 5 == 0:
-                if "ks_loss" in outputs and optimizer_k is not None:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
-                        epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
-                else:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
-                        epoch, iter_num, loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
-                    
-          
         avg_epoch_loss = epoch_loss_sum /iter_num 
         print("==> End of Epoch {}, average total loss = {:.4f}, average ks_loss = {:.4f}".format(
             epoch, avg_epoch_loss, running_ks_loss/iter_num))
