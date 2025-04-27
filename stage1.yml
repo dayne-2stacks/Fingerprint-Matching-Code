@@ -12,6 +12,6 @@ train:
   K_LR: 2.e-3             # Learning rate for k-regression (AFA) modules
   LR_DECAY: 0.5          # LR decay factor
   patience: 20           # Early stopping patience (in epochs)
-  num_epochs: 10
+  num_epochs: 1000
 ngm:
   REGRESSION: false       # If true, use predicted k in stage 3; otherwise, use ground truth k

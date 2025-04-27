@@ -36,15 +36,16 @@ FEATURE_CHANNEL = 512
 FIRST_ORDER = True
 POSITIVE_EDGES= True
 GNN_LAYER =3
-SK_TAU= 0.005
+# SK_TAU= 0.005
+SK_TAU=0.01
 SK_EMB=1
 GNN_FEAT = [16, 16, 16]
 GNN_LAYER = 3
 EDGE_EMB=False
-BATCH_SIZE=8
+BATCH_SIZE=12
 
 UNIV_SIZE=400
-SK_ITER_NUM=10
+SK_ITER_NUM=15
 SK_EPSILON=1e-10
 K_FACTOR=5.
 
@@ -123,34 +124,34 @@ class Net(CNN):
         self.trainings=True
         
         self.k_params_id = []
-        if self.regression:
-            # Only implementing AFAU
-            self.encoder_k = Encoder()
-            self.k_params_id += [id(item) for item in self.encoder_k.parameters()]
-            self.maxpool = nn.MaxPool1d(kernel_size=self.univ_size)
-            self.final_row = nn.Sequential(
-                nn.Linear(self.univ_size, 8),
-                nn.ReLU(),
-                nn.Linear(8, 1),
-                nn.Sigmoid()
-            )
+    # if self.regression:
+        # Only implementing AFAU
+        self.encoder_k = Encoder()
+        self.k_params_id += [id(item) for item in self.encoder_k.parameters()]
+        self.maxpool = nn.MaxPool1d(kernel_size=self.univ_size)
+        self.final_row = nn.Sequential(
+            nn.Linear(self.univ_size, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()
+        )
 
-            self.final_col = nn.Sequential(
-                nn.Linear(self.univ_size, 8),
-                nn.ReLU(),
-                nn.Linear(8, 1),
-                nn.Sigmoid()
-            )
+        self.final_col = nn.Sequential(
+            nn.Linear(self.univ_size, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+            nn.Sigmoid()
+        )
 
-            self.k_params_id += [id(item) for item in self.final_row.parameters()]
-            self.k_params_id += [id(item) for item in self.final_col.parameters()]
+        self.k_params_id += [id(item) for item in self.final_row.parameters()]
+        self.k_params_id += [id(item) for item in self.final_col.parameters()]
 
-            self.k_params = [
-            {'params': self.encoder_k.parameters()},
-            {'params': self.final_row.parameters()},
-            {'params': self.final_col.parameters()}
-            ]
-    
+        self.k_params = [
+        {'params': self.encoder_k.parameters()},
+        {'params': self.final_row.parameters()},
+        {'params': self.final_col.parameters()}
+        ]
+
     def forward(self, data_dict, regression=True):
         images = data_dict['images'] # Loaded from custom dataset
         points = data_dict['Ps'] # Pore locations
@@ -195,7 +196,8 @@ class Net(CNN):
             U = concat_features(feature_align(nodes, point, num_p, self.rescale), num_p)
             F = concat_features(feature_align(edges, point, num_p, self.rescale), num_p)
             node_features = torch.cat((U, F), dim=1)
-            node_feature_list.append(node_features.detach())
+            # This detaches the node features that would cause no gradients to flow back into the model.
+            node_feature_list.append(node_features)
             # node_features = self.proj(node_features)
             graph.x = node_features
             

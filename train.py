@@ -24,9 +24,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-config_files = ["stage3.yml"]
+config_files = ["stage2.yml"]
 # config_files = ["stage1.yml","stage2.yml","stage3.yml"]
-start_path = Path("checkpoints")
+start_path = Path("checkpoints2")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
 
@@ -74,14 +74,14 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "result"
+    OUTPUT_PATH = "result3"
     PRETRAINED_PATH = ""  # Set this to a pretrained model path if needed
 
     # =====================================================
     # Setup Logging
     # =====================================================
     logging.basicConfig(
-        filename='fp.log', 
+        filename='fp2.log', 
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
@@ -110,9 +110,9 @@ for file in config_files:
     test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
     val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
 
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
-    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=True)
-    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=True)
+    dataloader = get_dataloader(image_dataset, shuffle=True)
+    test_dataloader = get_dataloader(test_dataset, shuffle=True)
+    val_dataloader = get_dataloader(val_dataset, shuffle=True)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -137,42 +137,7 @@ for file in config_files:
     else:
         stage = None  # Default if not matching; ideally should not happen.
 
-    if stage == 1:
-        print("Stage 1: Freezing all layers in k_params and training other parameters.")
-        # Freeze k_params
-        # for param in model.k_params:
-        #     for p in param["params"]:
-        #         p.requires_grad = False
-        # # Ensure all other parameters are trainable
-       
-        # In stage 1 we do not optimize the k_params
-        K_Optimize = False
-        k_iter_num=1
-    elif stage == 2:
-        print("Stage 2: Freezing all parameters except k_params (which are unfrozen).")
-        # Freeze all parameters first
-        for param in model.parameters():
-            param.requires_grad = True
-        # Unfreeze only k_params
-        for param in model.k_params:
-            for p in param["params"]:
-                p.requires_grad = True
-        # In stage 2, we optimize only the k_params.
-        K_Optimize = True
 
-    elif stage == 3:
-        print("Stage 3: Unfreezing all layers for full fine-tuning.")
-        # Unfreeze every parameter
-        for param in model.parameters():
-            param.requires_grad = True
-        for param in model.k_params:
-            for p in param["params"]:
-                p.requires_grad = True
-        K_Optimize = True
-
-    else:
-        print("Stage not specified; using default training settings.")
-        K_Optimize = train_config.get("K_Optimize", False)
 
     # =====================================================
     # Set up Optimizers (with optional separate k_optimizer)
@@ -187,6 +152,18 @@ for file in config_files:
             {'params': other_params},
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
+        
+        print("Stage 1: Freezing all layers in k_params and training other parameters.")
+        # Freeze k_params
+        for param in model.k_params:
+            for p in param["params"]:
+                p.requires_grad = False
+        # # Ensure all other parameters are trainable
+       
+        # In stage 1 we do not optimize the k_params
+        K_Optimize = False
+        k_iter_num=1
+        
         # Only parameters with requires_grad == True will be optimized.
         optimizer = optim.Adam(model_params, lr=LR)
         optimizer_k = None
@@ -198,10 +175,22 @@ for file in config_files:
             {'params': other_params},
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
+        
+        print("Stage 2: Freezing all parameters except k_params (which are unfrozen).")
+        # Freeze all parameters first
+        for param in model.parameters():
+            param.requires_grad = False
+        # Unfreeze only k_params
+        for param in model.k_params:
+            for p in param["params"]:
+                p.requires_grad = True
+        # In stage 2, we optimize only the k_params.
+        K_Optimize = True
+        k_iter_num = 0
         # In stage 2, only k_params are trainable.
         optimizer = optim.Adam(model_params, lr=LR)
         optimizer_k = optim.Adam(model.k_params, lr=K_LR)
-        k_iter_num=0
+
     elif stage == 3:
         # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -211,6 +200,16 @@ for file in config_files:
             {'params': other_params},
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
+        
+        print("Stage 3: Unfreezing all layers for full fine-tuning.")
+        # Unfreeze every parameter
+        for param in model.parameters():
+            param.requires_grad = True
+        for param in model.k_params:
+            for p in param["params"]:
+                p.requires_grad = True
+        K_Optimize = True
+
 
         optimizer = optim.Adam(model_params, lr=LR)
         optimizer_k = optim.Adam(model.k_params, lr=K_LR)
@@ -299,71 +298,73 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for batch_idx, batch in enumerate(dataloader):
-            iter_num += 1
-            if K_Optimize:
-                k_iter_num +=1
-            batch = data_to_cuda(batch)
-            
-            # Zero the parameter gradients 
-            optimizer.zero_grad()
-            if optimizer_k is not None:
-                optimizer_k.zero_grad()
-            
-            outputs = model(batch)
-            
-            
-            # -------------- Check ds mat ---------------------
-            # # Print a summary of the outputs to see if they vary across iterations
-            # ds_mat = outputs["ds_mat"]
-            # print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
-            # -------------- Check ds mat ---------------------
-            
+        for i in range(5):
+            for batch_idx, batch in enumerate(dataloader):
+                iter_num += 1
+                if K_Optimize:
+                    k_iter_num +=1
+                batch = data_to_cuda(batch)
+                
+                # Zero the parameter gradients 
+                optimizer.zero_grad()
+                if optimizer_k is not None:
+                    optimizer_k.zero_grad()
+                
+                outputs = model(batch)
+                
+                
+                # -------------- Check ds mat ---------------------
+                # # Print a summary of the outputs to see if they vary across iterations
+                # ds_mat = outputs["ds_mat"]
+                # print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
+                # -------------- Check ds mat ---------------------
+                
 
-            loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-            ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
-            
-            # Accumulate ks_loss for logging
-            running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-            running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
-            
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
-            
-            
-            total_loss.backward()  
-            
-            # Check gradients: iterate over model parameters and print norm of gradients
-            # grad_norms = []
-            # for name, param in model.named_parameters():
-            #     if param.grad is not None and "classifier" in name:
-            #         grad_norm = param.grad.data.norm().item()
-            #         grad_norms.append((name, grad_norm))
-            # print(f"Iteration {batch_idx}: Gradient norms: {grad_norms}") 
-            # Check gradients: iterate over model parameters and print norm of gradients
-            
-             
-            optimizer.step()
-            if optimizer_k is not None:
-                optimizer_k.step()
-            
-            # Compute accuracy (if desired)
-            acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-            
-            
-            # Sum the total loss (loss + ks_loss) for epoch reporting
-            epoch_loss_sum += loss.item()
-            
-            if iter_num % 5 == 0:
-                if "ks_loss" in outputs and optimizer_k is not None:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
-                        epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
-                else:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
-                        epoch, iter_num, loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
-                    
+                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+                ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+                
+                # Accumulate ks_loss for logging
+                running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
+                running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
+                
+                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
+                
+                
+                total_loss.backward()  
+                
+                # Check gradients: iterate over model parameters and print norm of gradients
+                # grad_norms = []
+                # for name, param in model.named_parameters():
+                #     if param.grad is not None and "classifier" in name:
+                #         grad_norm = param.grad.data.norm().item()
+                #         grad_norms.append((name, grad_norm))
+                # print(f"Iteration {batch_idx}: Gradient norms: {grad_norms}") 
+                # Check gradients: iterate over model parameters and print norm of gradients
+                
+                
+                optimizer.step()
+                if optimizer_k is not None:
+                    optimizer_k.step()
+                
+                # Compute accuracy (if desired)
+                acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+                
+                print(acc)
+                
+                # Sum the total loss (loss + ks_loss) for epoch reporting
+                epoch_loss_sum += loss.item()
+                
+                if iter_num % 5 == 0:
+                    if "ks_loss" in outputs and optimizer_k is not None:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
+                            epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
+                    else:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
+                            epoch, iter_num, loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
+                        
         # if K_Optimize:
         #     avg_epoch_loss = running_ks_loss / num_iterations    
         # else:        
@@ -409,7 +410,7 @@ for file in config_files:
                 
                 
         avg_val_loss = val_loss_sum / len(val_dataloader)
-        avg_ks_loss = ks_loss / len(val_dataloader)
+        avg_ks_loss = val_ks_sum / len(val_dataloader)
         print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
         # Compute accuracy on the last batch of validation (for example)
         acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
@@ -511,6 +512,9 @@ model.eval()
 with torch.no_grad():
     outputs = model(single_sample)
     
+acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+                
+    
 # Explicitly select the first sample from the batch
 if 'Ps' in single_sample:
     kp0 = single_sample['Ps'][0][0].cpu().numpy()
@@ -554,29 +558,38 @@ print(len(single_sample["images"]))
 
 if "id_list" in single_sample:
     img0 = single_sample["images"][0][0]
-    img1 = single_sample["images"][0][1]
+    img1 = single_sample["images"][1][0]
 else:
     img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
     img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
     print("Using fallback image paths.")
 
-def to_grayscale_cv2_image(tensor):
+
+NORM_MEANS= [0.485, 0.456, 0.406] 
+NORM_STD=[0.229, 0.224, 0.225]
+
+def to_grayscale_cv2_image(tensor, mean=NORM_MEANS, std=NORM_STD):
     """
-    Converts a grayscale torch tensor to a valid OpenCV image.
+    Converts a CHW torch tensor (normalized in [0,1] or by mean/std) 
+    to a uint8 OpenCV grayscale image.
+    If mean/std were used during preprocessing, pass them here.
     """
-    # Step 1: Ensure on CPU and detach from graph
     tensor = tensor.detach().cpu()
 
-    # Step 2: Convert from CHW → HWC
-    image = tensor.permute(1, 2, 0).numpy()  # shape now (240, 320, 3)
+    # 1) Undo Normalize(mean,std) if provided
+    if mean is not None and std is not None:
+        # assume mean/std are sequences of length = channels
+        m = torch.tensor(mean).view(-1, 1, 1)
+        s = torch.tensor(std).view(-1, 1, 1)
+        tensor = tensor * s + m
 
-    # Step 3: Scale to [0, 255] and convert to uint8
-    image = (image * 255).astype(np.uint8)
+    # 2) CHW → HWC and scale to [0,255]
+    img = tensor.permute(1, 2, 0).numpy()
+    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
 
-    # Step 4: Convert RGB → Grayscale for OpenCV
-    gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-    return gray_image
+    # 3) RGB → Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return gray
 
 
 img0= to_grayscale_cv2_image(img0)
@@ -607,3 +620,5 @@ print("Number of matches found:", len(matches))
 img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
 cv2.imwrite("matching_result.jpg", img_matches)
 print("Matching result saved as 'matching_result.jpg'.")
+
+print(acc)
