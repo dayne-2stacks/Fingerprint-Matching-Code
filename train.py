@@ -18,6 +18,7 @@ from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model
 from utils.visualize import visualize_stochastic_matrix
 from src.evaluation_metric import matching_accuracy
+from utils.scheduler import WarmupScheduler
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
@@ -109,9 +110,9 @@ for file in config_files:
     test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
     val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
 
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
-    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=True)
-    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=True)
+    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=False)
+    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)
+    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=False)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -187,7 +188,7 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
         # Only parameters with requires_grad == True will be optimized.
-        optimizer = optim.Adam(model_params, lr=LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = None
     elif stage == 2:
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -198,8 +199,8 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
         # In stage 2, only k_params are trainable.
-        optimizer = optim.Adam(model_params, lr=LR)
-        optimizer_k = optim.Adam(model.k_params, lr=K_LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     elif stage == 3:
         # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -210,10 +211,10 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
 
-        optimizer = optim.Adam(model_params, lr=LR)
-        optimizer_k = optim.Adam(model.k_params, lr=K_LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     else:
-        optimizer = optim.Adam(model.parameters(), lr=LR)
+        optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
 
     # =====================================================
@@ -221,18 +222,20 @@ for file in config_files:
     # =====================================================
     # milestones = [int(0.6 * num_epochs), int(0.7 * num_epochs), int(0.9 * num_epochs)]
     milestones = [int(0.025*num_epochs),int(0.05*num_epochs),int(0.2*num_epochs),int(0.4*num_epochs),int(0.6*num_epochs),int(0.8*num_epochs),int(0.1*num_epochs)]
-    
+    warmup_epochs = 10
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
     if optimizer_k is not None:
         # scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=10, factor=0.5)
+        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=10, factor=0.5)
+        scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler_k)
 
     # =====================================================
     # Checkpoint Loading (if start_epoch > 0)
@@ -298,7 +301,7 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for i in range(50):
+        for i in range(3):
             for batch in dataloader:
                 iter_num += 1
                 batch = data_to_cuda(batch)
@@ -320,7 +323,9 @@ for file in config_files:
                 total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
                 
                 
-                total_loss.backward()    
+                total_loss.backward()
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)    
                 optimizer.step()
                 if optimizer_k is not None:
                     optimizer_k.step()
@@ -337,12 +342,12 @@ for file in config_files:
                 if iter_num % 5 == 0:
                     if "ks_loss" in outputs and optimizer_k is not None:
                         print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
-                            epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
-                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
+                            epoch, iter_num, loss.item()/iter_num, ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}, ks_loss: {ks_loss.item():.4f}")
                     else:
                         print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
-                            epoch, iter_num, loss.item()))
-                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
+                            epoch, iter_num, loss.item()/iter_num))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}")
                         
             
         avg_epoch_loss = epoch_loss_sum /iter_num 
@@ -359,36 +364,36 @@ for file in config_files:
         # =====================================================
         # ---- Validation after each epoch ----
         # =====================================================
-        # model.eval()
-        # val_loss_sum = 0.0
-        # val_ks_sum = 0.0
+        model.eval()
+        val_loss_sum = 0.0
+        val_ks_sum = 0.0
         
-        # with torch.no_grad():
-        #     for batch in val_dataloader:
-        #         batch = data_to_cuda(batch)
-        #         outputs = model(batch)
-        #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-        #         ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-        #         print("Validation - ks_loss: ", ks_loss)
-        #         print("Validation - loss: ", loss)
-        #         # Sum without scaling
-        #         # if stage == 2 or stage ==3:
-        #         #     val_loss_sum += (ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss)
-        #         # else: 
-        #         val_loss_sum += loss.item()
-        #         if optimizer_k is not None:
-        #             val_ks_sum += ks_loss.item()
-        #         else:
-        #             val_ks_sum += ks_loss
+        with torch.no_grad():
+            for batch in val_dataloader:
+                batch = data_to_cuda(batch)
+                outputs = model(batch)
+                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+                print("Validation - ks_loss: ", ks_loss)
+                print("Validation - loss: ", loss)
+                # Sum without scaling
+                # if stage == 2 or stage ==3:
+                #     val_loss_sum += (ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss)
+                # else: 
+                val_loss_sum += loss.item()
+                if optimizer_k is not None:
+                    val_ks_sum += ks_loss.item()
+                else:
+                    val_ks_sum += ks_loss
                 
                 
                 
-        # avg_val_loss = val_loss_sum / len(val_dataloader)
-        # avg_ks_loss = ks_loss / len(val_dataloader)
-        # print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
-        # # Compute accuracy on the last batch of validation (for example)
-        # acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-        # print("Validation Accuracy: ", acc)
+        avg_val_loss = val_loss_sum / len(val_dataloader)
+        avg_ks_loss = val_ks_loss / len(val_dataloader)
+        print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
+        # Compute accuracy on the last batch of validation (for example)
+        acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+        print("Validation Accuracy: ", acc)
         
         # Save best model based on validation loss and update checkpoint file
         if avg_epoch_loss < best_loss:
@@ -431,32 +436,7 @@ for file in config_files:
             best_model_path = str(checkpoint_path / "best_model.pt")
             load_model(model, best_model_path, strict=False)
             
-            optim_path = str(checkpoint_path / f"optim_{epoch + 1:04}.pt")
-            if os.path.exists(optim_path):
-                print("Reloading optimizer state from", optim_path)
-                # Save current (reduced) learning rates
-                current_lr = [group['lr'] for group in optimizer.param_groups]
-                if optimizer_k is not None:
-                    current_lr_k = [group['lr'] for group in optimizer_k.param_groups]
-                
-                # Load optimizer state from checkpoint
-                state = torch.load(optim_path)
-                optimizer.load_state_dict(state)
-                # Restore current lr values
-                for group, lr in zip(optimizer.param_groups, current_lr):
-                    group['lr'] = lr
-                
-                # For optimizer_k, load the same state and restore its learning rates
-                if optimizer_k is not None:
-                    state = torch.load(optim_k_path)
-                    print("Reloading optimizer_k state from", optim_k_path)
-                    optimizer_k.load_state_dict(state)
-                    for group, lr in zip(optimizer_k.param_groups, current_lr_k):
-                        group['lr'] = lr
-            else:
-                print("Optimizer checkpoint not found for reloading.")
-
-
+       
         
         # ---- Test Evaluation Periodically ----
         if epoch % 10 == 0:
