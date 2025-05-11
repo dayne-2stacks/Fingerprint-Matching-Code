@@ -7,11 +7,11 @@ train:
   BATCH_SIZE: 1
   K_Optimize: false       # Whether to optimize k (AFA) modules separately
   K_LOSS: false          # Whether to use k_loss as the primary metric for early stopping
-  LR: 2.e-5               # Learning rate for main network (joint training)
-  BACKBONE_LR: 2.e-5      # Learning rate for backbone parameters
+  LR: 1.e-3               # Learning rate for main network (joint training)
+  BACKBONE_LR: 1.e-4      # Learning rate for backbone parameters
   K_LR: 2.e-3             # Learning rate for k-regression (AFA) modules
   LR_DECAY: 0.5          # LR decay factor
-  patience: 3           # Early stopping patience (in epochs)
-  num_epochs: 10
+  patience: 75           # Early stopping patience (in epochs)
+  num_epochs: 1000
 ngm:
   REGRESSION: false       # If true, use predicted k in stage 3; otherwise, use ground truth k

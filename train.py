@@ -18,13 +18,14 @@ from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model
 from utils.visualize import visualize_stochastic_matrix
 from src.evaluation_metric import matching_accuracy
+from utils.scheduler import WarmupScheduler
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
-config_files = [ "stage2.yml","stage3.yml"]
-#config_files = ["stage3.yml"]
+# config_files = [ "stage1.yml", "stage2.yml","stage3.yml"]
+config_files = ["stage1.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -109,9 +110,9 @@ for file in config_files:
     test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
     val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
 
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
-    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=True)
-    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=True)
+    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=False)
+    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)
+    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=False)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -187,7 +188,7 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
         # Only parameters with requires_grad == True will be optimized.
-        optimizer = optim.Adam(model_params, lr=LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = None
     elif stage == 2:
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -198,8 +199,8 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
         # In stage 2, only k_params are trainable.
-        optimizer = optim.Adam(model_params, lr=LR)
-        optimizer_k = optim.Adam(model.k_params, lr=K_LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     elif stage == 3:
         # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.
         backbone_ids = [id(item) for item in model.backbone_params]
@@ -210,10 +211,10 @@ for file in config_files:
             {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
 
-        optimizer = optim.Adam(model_params, lr=LR)
-        optimizer_k = optim.Adam(model.k_params, lr=K_LR)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     else:
-        optimizer = optim.Adam(model.parameters(), lr=LR)
+        optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
 
     # =====================================================
@@ -221,18 +222,20 @@ for file in config_files:
     # =====================================================
     # milestones = [int(0.6 * num_epochs), int(0.7 * num_epochs), int(0.9 * num_epochs)]
     milestones = [int(0.025*num_epochs),int(0.05*num_epochs),int(0.2*num_epochs),int(0.4*num_epochs),int(0.6*num_epochs),int(0.8*num_epochs),int(0.1*num_epochs)]
-    
+    warmup_epochs = 10
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.5)
+    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
     if optimizer_k is not None:
         # scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=2, factor=0.5)
+        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=10, factor=0.5)
+        scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler_k)
 
     # =====================================================
     # Checkpoint Loading (if start_epoch > 0)
@@ -273,6 +276,7 @@ for file in config_files:
         print("Epoch {}/{}".format(epoch, start_epoch + num_epochs - 1))
         print("-" * 10)
         
+        
         if start_epoch == epoch:
             for param_group in optimizer.param_groups:
                 if 'lr' in param_group:
@@ -297,53 +301,56 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for batch in dataloader:
-            iter_num += 1
-            batch = data_to_cuda(batch)
+        for i in range(3):
+            for batch in dataloader:
+                iter_num += 1
+                batch = data_to_cuda(batch)
+                
+                # Zero the parameter gradients 
+                optimizer.zero_grad()
+                if optimizer_k is not None:
+                    optimizer_k.zero_grad()
+                
+                outputs = model(batch)
+                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+                ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+                
+                # Accumulate ks_loss for logging
+                running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
+                running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
+                
+                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
+                
+                
+                total_loss.backward()
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)    
+                optimizer.step()
+                if optimizer_k is not None:
+                    optimizer_k.step()
+                
+                # Compute accuracy (if desired)
+                acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+                
+                print("Accuracy", acc)
+                
+                
+                # Sum the total loss (loss + ks_loss) for epoch reporting
+                epoch_loss_sum += loss.item()
+                
+                if iter_num % 5 == 0:
+                    if "ks_loss" in outputs and optimizer_k is not None:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
+                            epoch, iter_num, loss.item()/iter_num, ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}, ks_loss: {ks_loss.item():.4f}")
+                    else:
+                        print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
+                            epoch, iter_num, loss.item()/iter_num))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}")
+                        
             
-            # Zero the parameter gradients 
-            optimizer.zero_grad()
-            if optimizer_k is not None:
-                optimizer_k.zero_grad()
-            
-            outputs = model(batch)
-            loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-            ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
-            
-            # Accumulate ks_loss for logging
-            running_ks_loss += ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-            running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
-            
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else 0)# Combine the two losses without any scaling
-            
-            
-            total_loss.backward()    
-            optimizer.step()
-            if optimizer_k is not None:
-                optimizer_k.step()
-            
-            # Compute accuracy (if desired)
-            acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-            
-            
-            # Sum the total loss (loss + ks_loss) for epoch reporting
-            epoch_loss_sum += loss.item()
-            
-            if iter_num % 5 == 0:
-                if "ks_loss" in outputs and optimizer_k is not None:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
-                        epoch, iter_num, loss.item(), ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}, ks_loss: {ks_loss.item():.4f}")
-                else:
-                    print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
-                        epoch, iter_num, loss.item()))
-                    logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item():.4f}")
-                    
-        if K_Optimize:
-            avg_epoch_loss = running_ks_loss / num_iterations    
-        else:        
-            avg_epoch_loss = epoch_loss_sum /iter_num 
+        avg_epoch_loss = epoch_loss_sum /iter_num 
         print("==> End of Epoch {}, average total loss = {:.4f}, average ks_loss = {:.4f}".format(
             epoch, avg_epoch_loss, running_ks_loss/iter_num))
         logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/iter_num:.4f}")
@@ -382,15 +389,15 @@ for file in config_files:
                 
                 
         avg_val_loss = val_loss_sum / len(val_dataloader)
-        avg_ks_loss = ks_loss / len(val_dataloader)
+        avg_ks_loss = val_ks_loss / len(val_dataloader)
         print("Epoch {}: Validation Loss = {:.4f}".format(epoch, avg_val_loss))
         # Compute accuracy on the last batch of validation (for example)
         acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
         print("Validation Accuracy: ", acc)
         
         # Save best model based on validation loss and update checkpoint file
-        if avg_val_loss < best_loss:
-            best_loss = avg_val_loss
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
             no_improvement_count = 0
             best_model_path = str(checkpoint_path / "best_model.pt")
             save_model(model, best_model_path)
@@ -403,10 +410,33 @@ for file in config_files:
                 print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
                 break
 
+                # Step LR schedulers
+        # Initialize previous learning rates on first epoch
+        if epoch == start_epoch:
+            prev_lr = [group['lr'] for group in optimizer.param_groups]
+            if optimizer_k is not None:
+                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
+
         # Step LR schedulers
-        scheduler.step(avg_val_loss)
+        # scheduler.step(avg_val_loss)
+        # if optimizer_k is not None:
+        #     scheduler_k.step(avg_val_loss)
+        
+        scheduler.step(avg_epoch_loss)
         if optimizer_k is not None:
-            scheduler_k.step(avg_ks_loss)
+            scheduler_k.step(avg_epoch_loss)
+
+        # Detect LR reduction for main optimizer
+        curr_lr = [group['lr'] for group in optimizer.param_groups]
+        lr_reduced = any(clr < plr for clr, plr in zip(curr_lr, prev_lr))
+        prev_lr = curr_lr  # Update previous for next iteration
+
+        if lr_reduced:
+            print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
+            best_model_path = str(checkpoint_path / "best_model.pt")
+            load_model(model, best_model_path, strict=False)
+            
+       
         
         # ---- Test Evaluation Periodically ----
         if epoch % 10 == 0:

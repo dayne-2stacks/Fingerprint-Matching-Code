@@ -1,9 +1,74 @@
-
-# use bn final since I want features
 import torch
 import torch.nn as nn
 from torchvision import models
 
+
+
+class ResNet18_base(nn.Module):
+    """
+    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
+      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
+      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
+      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+    """
+    def __init__(self, final_layers: bool = False):
+        super().__init__()
+        self.node_layers, self.edge_layers, self.final_layers = self.get_backbone()
+        if not final_layers:
+            self.final_layers = None          # mimic VGG16_base logic
+        self.backbone_params = list(self.parameters())
+
+    def forward(self, *inputs):
+        """
+        Keep the same contract as VGG16_base – subclasses decide how to combine
+        node/edge features for their specific graph-matching head.
+        """
+        raise NotImplementedError
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    # ---------- internal helpers ----------
+    @staticmethod
+    def get_backbone():
+        """
+        Build ResNet-18 backbone split into the three logical chunks.
+        """
+        # torchvision ≥0.15 uses the `weights=` kwarg; fall back if older
+        try:
+            backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        except AttributeError:
+            backbone = models.resnet18(pretrained=True)
+
+        # --- stride-16 path (conv1-->layer3) ---
+        node_layers = nn.Sequential(
+            backbone.conv1, backbone.bn1, backbone.relu,
+            backbone.maxpool,
+            backbone.layer1, backbone.layer2, backbone.layer3
+        )  # output: 256 × H/16 × W/16
+
+        # --- stride-32 path (layer4) ---
+        edge_layers = nn.Sequential(backbone.layer4)  # 512 × H/32 × W/32
+
+        # --- optional global pooling like Rolink et al. (ECCV’20) ---
+        final_layers = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)))
+
+        return node_layers, edge_layers, final_layers
+
+
+# Convenience subclasses to mirror the VGG variants --------------------------
+
+class ResNet18_final(ResNet18_base):
+    """ResNet-18 **with** the final global-pool layer."""
+    def __init__(self):
+        super().__init__(final_layers=True)
+
+
+class ResNet18(ResNet18_base):
+    """ResNet-18 **without** the final global-pool layer."""
+    def __init__(self):
+        super().__init__(final_layers=False)
 
 class VGG16_base(nn.Module):
     r"""
