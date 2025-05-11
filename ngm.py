@@ -1,5 +1,5 @@
 import logging
-from feature_extractor import VGG16_bn_final as CNN
+from feature_extractor import ResNet18_final as CNN
 from spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
 from feature_align import feature_align
 from affinity_layer import InnerProductWithWeightsAffinity
@@ -31,7 +31,12 @@ logger = logging.getLogger(__name__)
 
 
 # Params
-FEATURE_CHANNEL = 512
+FEATURE_CHANNEL_NODE  = 256   # ResNet18 layer3 channels
+FEATURE_CHANNEL_EDGE  = 512   # ResNet18 layer4 channels
+NODE_FEATURE_DIM      = FEATURE_CHANNEL_NODE + FEATURE_CHANNEL_EDGE   # 768
+GLOBAL_FEATURE_DIM    = FEATURE_CHANNEL_EDGE                          # 512
+GLOBAL_STATE_DIM      = GLOBAL_FEATURE_DIM * 2                        # 1024
+
 
 FIRST_ORDER = True
 POSITIVE_EDGES= True
@@ -42,10 +47,10 @@ SK_EMB=1
 GNN_FEAT = [16, 16, 16]
 GNN_LAYER = 3
 EDGE_EMB=False
-BATCH_SIZE=12
+BATCH_SIZE=16
 
 UNIV_SIZE=400
-SK_ITER_NUM=15
+SK_ITER_NUM=25
 SK_EPSILON=1e-10
 K_FACTOR=5.
 
@@ -79,21 +84,28 @@ class Net(CNN):
     def __init__(self, regression=False):
         super(Net, self).__init__() # initialize the VGG16 model
         
-        self.message_pass_node_features = SiameseSConvOnNodes(input_node_dim=FEATURE_CHANNEL * 2)
-        self.build_edge_features_from_node_features = SiameseNodeFeaturesToEdgeFeatures(
-            total_num_nodes=self.message_pass_node_features.num_node_features
+        # --- Spline-Conv path ------------------------------------------------
+        self.message_pass_node_features = SiameseSConvOnNodes(
+            input_node_dim=NODE_FEATURE_DIM
         )
-        logger.info("Initialized Net with message_pass_node_features.num_node_features=%d",
-                self.message_pass_node_features.num_node_features)
-        
-        self.global_state_dim = FEATURE_CHANNEL * 2
-        # Model to create affinity matrices
+
+        self.build_edge_features_from_node_features = (
+            SiameseNodeFeaturesToEdgeFeatures(
+                total_num_nodes=self.message_pass_node_features.num_node_features
+            )
+        )
+
+        # --- Affinity layers -------------------------------------------------
+        self.global_state_dim = GLOBAL_STATE_DIM           # 1024
         self.vertex_affinity = InnerProductWithWeightsAffinity(
-            self.global_state_dim, self.message_pass_node_features.num_node_features)
-        
+            self.global_state_dim,                         # input  = 1024
+            self.message_pass_node_features.num_node_features  # output = 768
+        )
+
         self.edge_affinity = InnerProductWithWeightsAffinity(
-            self.global_state_dim,
-            self.build_edge_features_from_node_features.num_edge_features)
+            self.global_state_dim,                         # input  = 1024
+            self.build_edge_features_from_node_features.num_edge_features
+        )
         
         self.tau=SK_TAU 
         
@@ -196,7 +208,6 @@ class Net(CNN):
             U = concat_features(feature_align(nodes, point, num_p, self.rescale), num_p)
             F = concat_features(feature_align(edges, point, num_p, self.rescale), num_p)
             node_features = torch.cat((U, F), dim=1)
-            # This detaches the node features that would cause no gradients to flow back into the model.
             node_feature_list.append(node_features)
             # node_features = self.proj(node_features)
             graph.x = node_features

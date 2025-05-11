@@ -16,9 +16,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
     """
     A Benchmark subclass for our new L3SFV2Augmented dataset.
     
-    This class inherits from the Benchmark base class but overrides its
-    initialization so that it uses our new dataset. (We ignore the eval and eval_cls
-    methods since they are not of interest.)
+
     """
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM', filter='intersection', **args):
         # Instead of a dataset name from a fixed list, we use our new dataset.

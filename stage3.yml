@@ -13,3 +13,4 @@ train:
 
 ngm:
   REGRESSION: true       # If true, use predicted k in stage 3; otherwise, use ground truth k
+  
