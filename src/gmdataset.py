@@ -8,6 +8,8 @@ import random
 from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
+import cv2
+from utils.augmentation import augment_image
 
 
 
@@ -36,15 +38,15 @@ class GMDataset(Dataset):
         self.cls = None if cls in ['none', 'all'] else cls
 
         if self.cls is None:
-            self.classes = self.bm.classes
+            self.classes = self.bm.classes # This is 148
         else:
             self.classes = [self.cls]
 
         self.problem_type = problem
         self.img_num_list = self.bm.compute_img_num(self.classes[0])
 
-     
-        self.id_combination, self.length = self.bm.get_id_combination(self.cls)
+        # Updated to only get one image
+        self.id_combination, self.length = self.bm.get_id_combination(self.cls, num=1)
         self.length_list = []
         for cls in self.classes:
             cls_length = self.bm.compute_length(cls)
@@ -85,25 +87,69 @@ class GMDataset(Dataset):
     def get_pair(self, idx, cls):
         #anno_pair, perm_mat = self.bm.get_pair(self.cls if self.cls is not None else
         #                                       (idx % (BATCH_SIZE * len(self.classes))) // BATCH_SIZE)
+        # select a random class
         cls_num = random.randrange(0, len(self.classes))
+        # Get 2 ids from the selected class
         ids = list(self.id_combination[cls_num][idx % self.length_list[cls_num]])
+        # Get data from json file about pair
         anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
-        perm_mat = perm_mat_[(0, 1)].toarray()
-        while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
-            anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
-            perm_mat = perm_mat_[(0, 1)].toarray()
+        
+        
+        # Get one of the images (There will only be one since using original dataset)
+        # Load original image and annotations
+        
+        original_img = cv2.imread(self.bm.get_path(f"{anno_pair[0]['cls']}"))
+        original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+        
+        # Generate two distinct augmented versions of the same image
+        img1, annos1 = augment_image(original_img, original_annos)
+        img2, annos2 = augment_image(original_img, original_annos)
+        
+        # save_path_1 = f"augmented_pair_{idx}_1.jpg"
+        # save_path_2 = f"augmented_pair_{idx}_2.jpg"
+        # cv2.imwrite(save_path_1, img1)
+        # cv2.imwrite(save_path_2, img2)
+            
+        # Find common keypoints (by label)
+        labels1 = set(a[0] for a in annos1)
+        labels2 = set(a[0] for a in annos2)
+        common_labels = labels1.intersection(labels2)
+
+        # Update annotations: if a keypoint is not common, change its label to "outlier"
+        annos1_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos1]
+        annos2_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos2]
+        
+        # Filter annotations for common keypoints
+        annos1_filtered = [a for a in annos1 if a[0] in common_labels]
+        annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+
+        # Create permutation matrix based on matching labels
+        sorted_labels = sorted(common_labels)
+        label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
+        n_common = len(common_labels)
+        perm_mat = np.eye(n_common, dtype=np.float32)
+
+
+        # create permutation pair
+        # perm_mat = perm_mat_[(0, 1)].toarray()
+        # while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
+        #     anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
+        #     perm_mat = perm_mat_[(0, 1)].toarray()
 
         cls = [anno['cls'] for anno in anno_pair]
-        P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
-        P2 = [(kp['x'], kp['y']) for kp in anno_pair[1]['kpts']]
+        # Build graphs for each augmented image
+        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
+        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
 
-        n1, n2 = len(P1), len(P2)
+        n1, n2 = len(annos1_filtered), len(annos2_filtered)
+
         univ_size = [anno['univ_size'] for anno in anno_pair]
 
         P1 = np.array(P1)
         P2 = np.array(P2)
+    
 
-        A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+        A1, G1, H1, e1 = build_graphs(P1, len(P1), stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
             G2 = perm_mat.transpose().dot(G1)
             H2 = perm_mat.transpose().dot(H1)
@@ -112,8 +158,44 @@ class GMDataset(Dataset):
         else:
             A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
 
+
         pyg_graph1 = self.to_pyg_graph(A1, P1)
         pyg_graph2 = self.to_pyg_graph(A2, P2)
+        
+        
+        
+        # ---------------------------------Visualize Matches---------------------------
+        # Make copies so we don't overwrite the original augmented images
+        # img1_vis = img1.copy()
+        # img2_vis = img2.copy()
+
+        # # Draw circles for each pore in img1 and img2
+        # for (x, y) in P1:
+        #     cv2.circle(img1_vis, (int(x), int(y)), 5, (0, 255, 0), -1)  # green circles
+        # for (x, y) in P2:
+        #     cv2.circle(img2_vis, (int(x), int(y)), 5, (255, 0, 0), -1)  # blue circles
+
+        # # Concatenate side by side
+        # # shape = (H, W, 3). Ensure both images have same height
+        # matched_image = np.concatenate([img1_vis, img2_vis], axis=1)
+
+        # # Now, if you want to draw lines showing which pore in P1 matches which in P2:
+        # offset_x = img1_vis.shape[1]  # The width of the first image
+        # for i in range(len(P1)):
+        #     # Because you used perm_mat = np.eye(n_common), 
+        #     # index i in P1 is matched with index i in P2.
+        #     (x1, y1) = P1[i]
+        #     (x2, y2) = P2[i]
+        #     x1, y1 = int(x1), int(y1)
+        #     x2, y2 = int(x2) + offset_x, int(y2)  # shift x2 by the offset
+        #     cv2.line(matched_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+        # # You can save or store matched_image in your return dict
+        # save_matched = f"augmented_pair_{idx}_matched.jpg"
+        # cv2.imwrite(save_matched, matched_image)
+
+        
+        
 
         ret_dict = {'Ps': [torch.Tensor(x) for x in [P1, P2]],
                     'ns': [torch.tensor(x) for x in [n1, n2]],
@@ -125,10 +207,10 @@ class GMDataset(Dataset):
                     'pyg_graphs': [pyg_graph1, pyg_graph2],
                     'cls': [str(x) for x in cls],
                     'id_list': id_list,
-                    'univ_size': [torch.tensor(int(x)) for x in univ_size],
+                    'univ_size': torch.tensor(n_common),
                     }
 
-        imgs = [anno['img'] for anno in anno_pair]
+        imgs = [img1, img2]
         if imgs[0] is not None:
             trans = transforms.Compose([
                     transforms.ToTensor(),
@@ -136,10 +218,10 @@ class GMDataset(Dataset):
                     ])
             imgs = [trans(img) for img in imgs]
             ret_dict['images'] = imgs
-        elif 'feat' in anno_pair[0]['kpts'][0]:
-            feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
-            feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
-            ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
+        # elif 'feat' in anno_pair[0]['kpts'][0]:
+        #     feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
+        #     feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
+        #     ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
 
         return ret_dict
 
@@ -180,8 +262,6 @@ class QAPDataset(Dataset):
 def collate_fn(data: list):
     """
     Create mini-batch data for training.
-    :param data: data dict
-    :return: mini-batch
     """
     def pad_tensor(inp):
         assert type(inp[0]) == torch.Tensor
@@ -196,15 +276,12 @@ def collate_fn(data: list):
             except StopIteration:
                 break
         max_shape = np.array(max_shape)
-
         padded_ts = []
         for t in inp:
             pad_pattern = np.zeros(2 * len(max_shape), dtype=np.int64)
             pad_pattern[::-2] = max_shape - np.array(t.shape)
-            #pad_pattern = torch.from_numpy(np.asfortranarray(pad_pattern))
             pad_pattern = tuple(pad_pattern.tolist())
             padded_ts.append(F.pad(t, pad_pattern, 'constant', 0))
-
         return padded_ts
 
     def stack(inp):
@@ -225,15 +302,10 @@ def collate_fn(data: list):
         elif type(inp[0]) == np.ndarray:
             new_t = pad_tensor([torch.from_numpy(x) for x in inp])
             ret = torch.stack(new_t, 0)
-        elif type(inp[0]) == pyg.data.Data:
+        elif isinstance(inp[0], pyg.data.Data):
             ret = pyg.data.Batch.from_data_list(inp)
-        elif type(inp[0]) == str:
-            ret = inp
-        elif type(inp[0]) == tuple:
-            ret = inp
-
         else:
-            raise ValueError('Cannot handle type {}'.format(type(inp[0])))
+            ret = inp
         return ret
 
     ret = stack(data)
@@ -277,7 +349,7 @@ def collate_fn(data: list):
             ret['KGHs'] = K1G, K1H
         else:
             raise ValueError('Data type not understood.')
-
+        
     if 'Fi' in ret and 'Fj' in ret:
         Fi = ret['Fi']
         Fj = ret['Fj']
@@ -285,13 +357,17 @@ def collate_fn(data: list):
         ret['aff_mat'] = aff_mat
 
     ret['batch_size'] = len(data)
-    ret['univ_size'] = torch.tensor([max(*[item[b] for item in ret['univ_size']]) for b in range(ret['batch_size'])])
-
+    # For univ_size, if it's a list of scalar tensors, stack them.
+    if isinstance(ret['univ_size'], list):
+        ret['univ_size'] = torch.stack(ret['univ_size'])
     for v in ret.values():
-        if type(v) is list:
+        if isinstance(v, list):
             ret['num_graphs'] = len(v)
             break
-
+    ret['batch_size'] = len(data)
+    # For univ_size, stack scalar tensors
+    if isinstance(ret['univ_size'], list):
+        ret['univ_size'] = torch.stack(ret['univ_size'])
     return ret
 
 
