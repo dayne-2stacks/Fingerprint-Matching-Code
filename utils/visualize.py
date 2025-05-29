@@ -4,6 +4,8 @@ import networkx as nx
 from torch_geometric.utils import to_networkx
 import seaborn as sns
 import torch
+import cv2
+import numpy as np 
 
 def visualize_stochastic_matrix(matrix, filename="matrix"):
     """
@@ -121,3 +123,31 @@ def visualize_pyg_batch(data, filename="photos/batch_graph.png"):
     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
     plt.close()
     # print(f"Graph visualization saved as {filename}")
+    
+
+
+def visualize_match(img0, img1, kp0, kp1, matches, prefix=""):
+    """
+    Visualizes keypoints and matches between two images and saves the results.
+    img0, img1: images as numpy arrays (grayscale or color)
+    kp0, kp1: keypoints as Nx2 numpy arrays
+    matches: list of cv2.DMatch objects
+    prefix: optional string to prepend to output filenames
+    """
+    # Convert keypoints to cv2.KeyPoint objects
+    cv2_kp0 = [cv2.KeyPoint(float(x[0]), float(x[1]), 1) for x in kp0]
+    cv2_kp1 = [cv2.KeyPoint(float(x[0]), float(x[1]), 1) for x in kp1]
+
+    img0_kp = cv2.drawKeypoints(img0, cv2_kp0, None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    img1_kp = cv2.drawKeypoints(img1, cv2_kp1, None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+    cv2.imwrite(f"{prefix}image0_keypoints.jpg", img0_kp)
+    cv2.imwrite(f"{prefix}image1_keypoints.jpg", img1_kp)
+
+    print("cv2_kp0 length:", len(cv2_kp0))
+    print("cv2_kp1 length:", len(cv2_kp1))
+    print("Number of matches found:", len(matches))
+
+    img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
+    cv2.imwrite(f"{prefix}matching_result.jpg", img_matches)
+    print(f"Matching result saved as '{prefix}matching_result.jpg'.")

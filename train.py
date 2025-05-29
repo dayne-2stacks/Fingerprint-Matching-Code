@@ -16,12 +16,38 @@ from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
 from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model
-from utils.visualize import visualize_stochastic_matrix
+from utils.visualize import visualize_stochastic_matrix, visualize_match
 from src.evaluation_metric import matching_accuracy
 from utils.scheduler import WarmupScheduler
 
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+NORM_MEANS= [0.485, 0.456, 0.406] 
+NORM_STD=[0.229, 0.224, 0.225]
+
+def to_grayscale_cv2_image(tensor, mean=NORM_MEANS, std=NORM_STD):
+    """
+    Converts a CHW torch tensor (normalized in [0,1] or by mean/std) 
+    to a uint8 OpenCV grayscale image.
+    If mean/std were used during preprocessing, pass them here.
+    """
+    tensor = tensor.detach().cpu()
+
+    # 1) Undo Normalize(mean,std) if provided
+    if mean is not None and std is not None:
+        # assume mean/std are sequences of length = channels
+        m = torch.tensor(mean).view(-1, 1, 1)
+        s = torch.tensor(std).view(-1, 1, 1)
+        tensor = tensor * s + m
+
+    # 2) CHW → HWC and scale to [0,255]
+    img = tensor.permute(1, 2, 0).numpy()
+    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+    # 3) RGB → Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return gray
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
@@ -75,14 +101,14 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "result3"
+    OUTPUT_PATH = "result"
     PRETRAINED_PATH = ""  # Set this to a pretrained model path if needed
 
     # =====================================================
     # Setup Logging
     # =====================================================
     logging.basicConfig(
-        filename='fp2.log', 
+        filename='fp.log', 
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
@@ -227,14 +253,14 @@ for file in config_files:
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)
-    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=4, factor=0.5)
     scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
     if optimizer_k is not None:
         # scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=10, factor=0.5)
+        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=4, factor=0.5)
         scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler_k)
 
     # =====================================================
@@ -267,6 +293,25 @@ for file in config_files:
             optimizer_k.load_state_dict(torch.load(optim_k_path))
         except FileNotFoundError:
             print("No optimizer_k checkpoint found; starting fresh for k_params.")
+    
+    # Initialize warmup scheduler learning rates after loading optimizer state
+    if start_epoch == 0:  # Only for fresh training, not resuming
+        print("Initializing warmup learning rates for first epoch...")
+        # Set the initial warmup learning rates
+        initial_lr = scheduler.get_initial_lr() if hasattr(scheduler, 'get_initial_lr') else LR / warmup_epochs
+        initial_backbone_lr = BACKBONE_LR / warmup_epochs  # Apply warmup to backbone LR too
+        
+        for param_group in optimizer.param_groups:
+            if param_group == optimizer.param_groups[-1]:  # Backbone group (assuming it's last)
+                param_group['lr'] = initial_backbone_lr
+            else:  # Other parameter groups
+                param_group['lr'] = initial_lr
+        
+        if optimizer_k is not None and scheduler_k is not None:
+            initial_k_lr = scheduler_k.get_initial_lr() if hasattr(scheduler_k, 'get_initial_lr') else K_LR / warmup_epochs
+            for param_group in optimizer_k.param_groups:
+                param_group['lr'] = initial_k_lr
+
     # =====================================================
     # Training Loop
     # =====================================================
@@ -277,19 +322,19 @@ for file in config_files:
         print("-" * 10)
         
         
-        if start_epoch == epoch:
-            for param_group in optimizer.param_groups:
-                if 'lr' in param_group:
-                # If it's the backbone parameter group, set the backbone LR
-                    if 'params' in param_group and any(id(p) in backbone_ids for p in param_group['params']):
-                        param_group['lr'] = BACKBONE_LR
-                    else:
-                        param_group['lr'] = LR  # Update the general learning rate
+        # if start_epoch == epoch and stage != 1:
+        #     for param_group in optimizer.param_groups:
+        #         if 'lr' in param_group:
+        #         # If it's the backbone parameter group, set the backbone LR
+        #             if 'params' in param_group and any(id(p) in backbone_ids for p in param_group['params']):
+        #                 param_group['lr'] = BACKBONE_LR
+        #             else:
+        #                 param_group['lr'] = LR  # Update the general learning rate
 
-            if optimizer_k is not None:
-                # Update learning rate for optimizer_k
-                for param_group in optimizer_k.param_groups:
-                    param_group['lr'] = K_LR
+        #     if optimizer_k is not None:
+        #         # Update learning rate for optimizer_k
+        #         for param_group in optimizer_k.param_groups:
+        #             param_group['lr'] = K_LR
 
         model.train()
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
@@ -301,7 +346,7 @@ for file in config_files:
         running_ks_error = 0.0
         
         iter_num = 0
-        for i in range(5):
+        for i in range(3):
             for batch_idx, batch in enumerate(dataloader):
                 iter_num += 1
                 if K_Optimize:
@@ -353,18 +398,18 @@ for file in config_files:
                 if iter_num % 5 == 0:
                     if "ks_loss" in outputs and optimizer_k is not None:
                         print("Epoch: {}, Iteration: {}, Loss: {:.4f}, ks_loss: {:.4f}, total_loss: {:.4f}".format(
-                            epoch, iter_num, loss.item()/iter_num, ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss, total_loss.item()))
-                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}, ks_loss: {ks_loss.item():.4f}")
+                            epoch, iter_num, epoch_loss_sum/iter_num, running_ks_loss/iter_num, total_loss.item()))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {epoch_loss_sum/iter_num:.4f}, ks_loss: {running_ks_loss/iter_num:.4f}")
                     else:
                         print("Epoch: {}, Iteration: {}, Loss: {:.4f}".format(
-                            epoch, iter_num, loss.item()/iter_num))
-                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {loss.item()/iter_num:.4f}")
+                            epoch, iter_num, epoch_loss_sum/iter_num))
+                        logger.info(f"Epoch: {epoch}, Iteration: {iter_num}, Loss: {epoch_loss_sum/iter_num:.4f}")
                         
             
         avg_epoch_loss = epoch_loss_sum /iter_num 
         print("==> End of Epoch {}, average total loss = {:.4f}, average ks_loss = {:.4f}".format(
             epoch, avg_epoch_loss, running_ks_loss/iter_num))
-        logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/k_iter_num:.4f}")
+        logger.info(f"==> End of Epoch {epoch}, Average Total Loss: {avg_epoch_loss:.4f}, Average ks_loss: {running_ks_loss/iter_num:.4f}")
 
         # Save checkpoints for model, optimizer, and optimizer_k
         save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
@@ -410,8 +455,8 @@ for file in config_files:
         print("Validation Accuracy: ", acc)
         
         # Save best model based on validation loss and update checkpoint file
-        if avg_epoch_loss < best_loss:
-            best_loss = avg_epoch_loss
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
             no_improvement_count = 0
             best_model_path = str(checkpoint_path / "best_model.pt")
             save_model(model, best_model_path)
@@ -424,25 +469,15 @@ for file in config_files:
                 print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
                 break
 
-                # Step LR schedulers
-        # Initialize previous learning rates on first epoch
-        if epoch == start_epoch:
-            prev_lr = [group['lr'] for group in optimizer.param_groups]
-            if optimizer_k is not None:
-                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
-
-        # Step LR schedulers
-        # Initialize previous learning rates on first epoch
-        if epoch == start_epoch:
-            prev_lr = [group['lr'] for group in optimizer.param_groups]
-            if optimizer_k is not None:
-                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
-
-        # Step LR schedulers
-        # scheduler.step(avg_val_loss)
-        # if optimizer_k is not None:
-        #     scheduler_k.step(avg_val_loss)
         
+
+        # Initialize previous learning rates on first epoch
+        if epoch == start_epoch:
+            prev_lr = [group['lr'] for group in optimizer.param_groups]
+            if optimizer_k is not None:
+                prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
+
+        # Step LR schedulers
         scheduler.step(avg_val_loss)
         if optimizer_k is not None:
             scheduler_k.step(avg_val_loss)
@@ -463,19 +498,62 @@ for file in config_files:
         if epoch % 10 == 0:
             model.eval()
             test_loss_sum = 0.0
+            last_batch = None
+            last_outputs = None
             with torch.no_grad():
                 for batch in test_dataloader:
                     batch = data_to_cuda(batch)
                     outputs = model(batch)
                     loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
                     test_loss_sum += loss.item()
+                    last_batch = batch
+                    last_outputs = outputs  # Save the last batch and outputs
+
             avg_test_loss = test_loss_sum / len(test_dataloader)
             print("Epoch {}: Test Loss = {:.4f}".format(epoch, avg_test_loss))
+
+            # --- Visualization for the last batch ---
+            if last_batch is not None and last_outputs is not None:
+                # Extract keypoints
+                if 'Ps' in last_batch:
+                    kp0 = last_batch['Ps'][0][0].cpu().numpy()
+                    kp1 = last_batch['Ps'][1][0].cpu().numpy()
+                else:
+                    kp0 = np.array([[100, 100], [150, 150], [200, 200]])
+                    kp1 = np.array([[110, 110], [160, 160], [210, 210]])
+
+                ds_mat = last_outputs["ds_mat"].cpu().numpy()[0]
+                per_mat = last_outputs["perm_mat"].cpu().numpy()[0]
+
+                matches = []
+                for i in range(ds_mat.shape[0]):
+                    valid_indices = np.where(per_mat[i] == 1)[0]
+                    if valid_indices.size == 0:
+                        continue
+                    best_index = valid_indices[np.argmax(ds_mat[i, valid_indices])]
+                    distance_value = np.squeeze(ds_mat[i, best_index])
+                    if hasattr(distance_value, "size") and distance_value.size != 1:
+                        distance_value = distance_value.flatten()[0]
+                    distance = float(distance_value)
+                    matches.append(cv2.DMatch(_queryIdx=i, _trainIdx=best_index, _imgIdx=0, _distance=distance))
+
+                if "id_list" in last_batch:
+                    img0 = last_batch["images"][0][0]
+                    img1 = last_batch["images"][1][0]
+                else:
+                    img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
+                    img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
+
+                img0 = to_grayscale_cv2_image(img0)
+                img1 = to_grayscale_cv2_image(img1)
+
+                # Visualize
+                visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos/")
 
 # =====================================================
 # Load Best Model and Evaluate on a Sample
 # =====================================================
-single_sample = next(iter(dataloader))
+single_sample = next(iter(val_dataloader))
 single_sample = data_to_cuda(single_sample)
 print(single_sample.keys())
 
@@ -509,13 +587,13 @@ cv2_kp1 = [cv2.KeyPoint(float(x[0]), float(x[1]), 1) for x in kp1]
 ds_mat = outputs["ds_mat"].cpu().numpy()[0]
 per_mat = outputs["perm_mat"].cpu().numpy()[0]
 
-print("ds_mat shape:", ds_mat.shape)
-print(ds_mat)
-print("per_mat shape:", per_mat.shape)
-print(per_mat)
-visualize_stochastic_matrix(per_mat, "Perm_matrix")
-print("Number of keypoints in image0 (from kp0):", kp0.shape[0])
-print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
+# print("ds_mat shape:", ds_mat.shape)
+# print(ds_mat)
+# print("per_mat shape:", per_mat.shape)
+# print(per_mat)
+# visualize_stochastic_matrix(per_mat, "Perm_matrix")
+# print("Number of keypoints in image0 (from kp0):", kp0.shape[0])
+# print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
 
 matches = []
 for i in range(ds_mat.shape[0]):
@@ -540,60 +618,10 @@ else:
     print("Using fallback image paths.")
 
 
-NORM_MEANS= [0.485, 0.456, 0.406] 
-NORM_STD=[0.229, 0.224, 0.225]
-
-def to_grayscale_cv2_image(tensor, mean=NORM_MEANS, std=NORM_STD):
-    """
-    Converts a CHW torch tensor (normalized in [0,1] or by mean/std) 
-    to a uint8 OpenCV grayscale image.
-    If mean/std were used during preprocessing, pass them here.
-    """
-    tensor = tensor.detach().cpu()
-
-    # 1) Undo Normalize(mean,std) if provided
-    if mean is not None and std is not None:
-        # assume mean/std are sequences of length = channels
-        m = torch.tensor(mean).view(-1, 1, 1)
-        s = torch.tensor(std).view(-1, 1, 1)
-        tensor = tensor * s + m
-
-    # 2) CHW → HWC and scale to [0,255]
-    img = tensor.permute(1, 2, 0).numpy()
-    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-
-    # 3) RGB → Grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    return gray
 
 
 img0= to_grayscale_cv2_image(img0)
 img1 = to_grayscale_cv2_image(img1)
 
-cv2_kp0 = []
-for kp in kp0: 
-    x = float(np.array(kp[0]).flatten()[0])
-    y = float(np.array(kp[1]).flatten()[0])
-    cv2_kp0.append(cv2.KeyPoint(x=x, y=y, size=1))
-    
-cv2_kp1 = []
-for kp in kp1:
-    x = float(np.array(kp[0]).flatten()[0])
-    y = float(np.array(kp[1]).flatten()[0])
-    cv2_kp1.append(cv2.KeyPoint(x=x, y=y, size=1))
-    
-img0_kp = cv2.drawKeypoints(img0, cv2_kp0, None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-img1_kp = cv2.drawKeypoints(img1, cv2_kp1, None, color=(0, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-
-cv2.imwrite("image0_keypoints.jpg", img0_kp)
-cv2.imwrite("image1_keypoints.jpg", img1_kp)
-
-print("cv2_kp0 length:", len(cv2_kp0))
-print("cv2_kp1 length:", len(cv2_kp1))
-print("Number of matches found:", len(matches))
-
-img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
-cv2.imwrite("matching_result.jpg", img_matches)
-print("Matching result saved as 'matching_result.jpg'.")
-
-print(acc)
+visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/")
+print("Accuracy: ", acc)

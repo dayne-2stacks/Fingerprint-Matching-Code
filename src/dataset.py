@@ -63,19 +63,19 @@ class L3SFV2AugmentedDataset:
         """
         if sets == 'train':
             # Assume training images are organized in subfolders R1–R5.
-            return [Path(os.path.join(train_root, "R6"))]
-            # return [Path(os.path.join(train_root, f"R{i}")) for i in range(1, 5)]
+            # return [Path(os.path.join(train_root, "R6"))]
+            return [Path(os.path.join(train_root, f"R{i}")) for i in range(1, 4)]
             return [Path(os.path.join(train_root, "R1"))]
         
         elif sets == 'test':
-            return [Path(os.path.join(train_root, "R6"))]
+            return [Path(os.path.join(train_root, "R4"))]
             
             return [Path(os.path.join(train_root, "R5"))]
             if test_root is None:
                 raise ValueError("For the test set, you must provide a test_root directory.")
             return [Path(test_root)]
         elif sets == 'val':
-            return [Path(os.path.join(train_root, "R6"))]
+            return [Path(os.path.join(train_root, "R5"))]
             
             return [Path(os.path.join(train_root, "R5"))]
             if val_root is None:
