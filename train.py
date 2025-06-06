@@ -52,8 +52,8 @@ def to_grayscale_cv2_image(tensor, mean=NORM_MEANS, std=NORM_STD):
 start_epoch = float('inf')
 # Set the three stage config files for a full pipeline
 # config_files = [ "stage1.yml", "stage2.yml","stage3.yml"]
-config_files = ["stage1.yml"]
-start_path = Path("checkpoints")
+config_files = ["stage2.yml"]
+start_path = Path("checkpoint1")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
 
@@ -101,14 +101,14 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "result"
+    OUTPUT_PATH = "result1"
     PRETRAINED_PATH = ""  # Set this to a pretrained model path if needed
 
     # =====================================================
     # Setup Logging
     # =====================================================
     logging.basicConfig(
-        filename='fp.log', 
+        filename='fp1.log', 
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
@@ -260,7 +260,7 @@ for file in config_files:
         #                                              milestones=milestones,
         #                                              gamma=LR_DECAY,
         #                                              last_epoch=-1)
-        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=4, factor=0.5)
+        main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=2, factor=0.5)
         scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler_k)
 
     # =====================================================
@@ -283,7 +283,7 @@ for file in config_files:
 
     if len(model_path) > 0:
         print("Loading model parameters from {}".format(model_path))
-        load_model(model, model_path, strict=False)
+        load_model(model, model_path)
     if len(optim_path) > 0:
         print("Loading optimizer state from {}".format(optim_path))
         optimizer.load_state_dict(torch.load(optim_path))
@@ -295,22 +295,30 @@ for file in config_files:
             print("No optimizer_k checkpoint found; starting fresh for k_params.")
     
     # Initialize warmup scheduler learning rates after loading optimizer state
-    if start_epoch == 0:  # Only for fresh training, not resuming
-        print("Initializing warmup learning rates for first epoch...")
-        # Set the initial warmup learning rates
-        initial_lr = scheduler.get_initial_lr() if hasattr(scheduler, 'get_initial_lr') else LR / warmup_epochs
-        initial_backbone_lr = BACKBONE_LR / warmup_epochs  # Apply warmup to backbone LR too
-        
-        for param_group in optimizer.param_groups:
-            if param_group == optimizer.param_groups[-1]:  # Backbone group (assuming it's last)
-                param_group['lr'] = initial_backbone_lr
-            else:  # Other parameter groups
-                param_group['lr'] = initial_lr
-        
-        if optimizer_k is not None and scheduler_k is not None:
-            initial_k_lr = scheduler_k.get_initial_lr() if hasattr(scheduler_k, 'get_initial_lr') else K_LR / warmup_epochs
-            for param_group in optimizer_k.param_groups:
-                param_group['lr'] = initial_k_lr
+    # if start_epoch == 0:  # Only for fresh training, not resuming
+    print("Initializing warmup learning rates for first epoch...")
+    # Set the initial warmup learning rates
+    initial_lr = scheduler.get_initial_lr() if hasattr(scheduler, 'get_initial_lr') else LR / warmup_epochs
+    initial_backbone_lr = BACKBONE_LR / warmup_epochs  # Apply warmup to backbone LR too
+    
+    for param_group in optimizer.param_groups:
+        if param_group == optimizer.param_groups[-1]:  # Backbone group (assuming it's last)
+            param_group['lr'] = initial_backbone_lr
+        else:  # Other parameter groups
+            param_group['lr'] = initial_lr
+    
+    if optimizer_k is not None and scheduler_k is not None:
+        initial_k_lr = scheduler_k.get_initial_lr() if hasattr(scheduler_k, 'get_initial_lr') else K_LR / warmup_epochs
+        for param_group in optimizer_k.param_groups:
+            param_group['lr'] = initial_k_lr
+            
+    
+    best_model_path = str(checkpoint_path / "best_model.pt")
+    if os.path.exists(best_model_path):
+        print(f"Loading best model weights from {best_model_path} before training loop...")
+        load_model(model, best_model_path)
+                
+    
 
     # =====================================================
     # Training Loop
@@ -490,7 +498,7 @@ for file in config_files:
         if lr_reduced:
             print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
             best_model_path = str(checkpoint_path / "best_model.pt")
-            load_model(model, best_model_path, strict=False)
+            load_model(model, best_model_path)
             
        
         
@@ -548,7 +556,8 @@ for file in config_files:
                 img1 = to_grayscale_cv2_image(img1)
 
                 # Visualize
-                visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos/")
+                visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos1/")
+                
 
 # =====================================================
 # Load Best Model and Evaluate on a Sample
@@ -560,7 +569,7 @@ print(single_sample.keys())
 # os.remove(start_file)
 best_model_path = str(checkpoint_path / "best_model.pt")
 print("Loading the best model for evaluation...")
-load_model(model, best_model_path, strict=False)
+load_model(model, best_model_path)
 model.eval()
 with torch.no_grad():
     outputs = model(single_sample)

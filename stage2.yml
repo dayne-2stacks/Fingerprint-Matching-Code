@@ -1,5 +1,5 @@
 train:
-  start_epoch: 1000         # Set to a positive integer to resume from a checkpoint
+  start_epoch: 60         # Set to a positive integer to resume from a checkpoint
   num_iterations: 25    # Iterations per epoch
   BATCH_SIZE: 1
   K_Optimize: true       # Whether to optimize k (AFA) modules separately

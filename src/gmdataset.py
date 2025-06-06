@@ -101,19 +101,23 @@ class GMDataset(Dataset):
         original_img = cv2.imread(self.bm.get_path(f"{anno_pair[0]['cls']}"))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
-        # Generate two distinct augmented versions of the same image
-        img1, annos1 = augment_image(original_img, original_annos)
-        img2, annos2 = augment_image(original_img, original_annos)
-        
-        # save_path_1 = f"augmented_pair_{idx}_1.jpg"
-        # save_path_2 = f"augmented_pair_{idx}_2.jpg"
-        # cv2.imwrite(save_path_1, img1)
-        # cv2.imwrite(save_path_2, img2)
+        n_common = 0
+        while n_common <= 3:
+            # Generate two distinct augmented versions of the same image
+            img1, annos1 = augment_image(original_img, original_annos)
+            img2, annos2 = augment_image(original_img, original_annos)
             
-        # Find common keypoints (by label)
-        labels1 = set(a[0] for a in annos1)
-        labels2 = set(a[0] for a in annos2)
-        common_labels = labels1.intersection(labels2)
+            # save_path_1 = f"augmented_pair_{idx}_1.jpg"
+            # save_path_2 = f"augmented_pair_{idx}_2.jpg"
+            # cv2.imwrite(save_path_1, img1)
+            # cv2.imwrite(save_path_2, img2)
+            
+            
+            # Find common keypoints (by label)
+            labels1 = set(a[0] for a in annos1)
+            labels2 = set(a[0] for a in annos2)
+            common_labels = labels1.intersection(labels2)
+            n_common = len(common_labels)
 
         # Update annotations: if a keypoint is not common, change its label to "outlier"
         annos1_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos1]
@@ -126,7 +130,7 @@ class GMDataset(Dataset):
         # Create permutation matrix based on matching labels
         sorted_labels = sorted(common_labels)
         label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
-        n_common = len(common_labels)
+        
         perm_mat = np.eye(n_common, dtype=np.float32)
 
 
