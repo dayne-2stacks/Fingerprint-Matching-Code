@@ -7,6 +7,7 @@ import torch
 from src.loss_func import PermutationLoss
 import torch.optim as optim
 from utils.models_sl import save_model, load_model
+from utils.matching import build_matches
 
 from pathlib import Path
 import cv2
@@ -195,22 +196,7 @@ print("Number of keypoints in image0 (from kp0):", kp0.shape[0])
 print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
 
 # Extract valid matches using per_mat as a mask
-matches = []
-for i in range(ds_mat.shape[0]):
-    # Get indices in image1 that are flagged as a valid match for keypoint i
-    valid_indices = np.where(per_mat[i] == 1)[0]
-    if valid_indices.size == 0:
-        # If no valid match is flagged, you can skip this keypoint
-        continue
-    # If multiple valid matches exist, select the one with the highest affinity score
-    best_index = valid_indices[np.argmax(ds_mat[i, valid_indices])]
-    # Extract the corresponding distance (affinity score) as a float.
-    # (You may want to convert the affinity to a proper distance measure if needed.)
-    distance_value = np.squeeze(ds_mat[i, best_index])
-    if hasattr(distance_value, 'size') and distance_value.size != 1:
-        distance_value = distance_value.flatten()[0]
-    distance = float(distance_value)
-    matches.append(cv2.DMatch(_queryIdx=i, _trainIdx=best_index, _imgIdx=0, _distance=distance))
+matches = build_matches(ds_mat, per_mat)
 
 # Now load the original images (either from single_sample or use fallback paths)
 if 'img0_path' in single_sample and 'img1_path' in single_sample:
