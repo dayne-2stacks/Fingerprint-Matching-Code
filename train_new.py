@@ -7,7 +7,7 @@ import torch
 import torch.optim as optim
 from src.benchmark import L3SFV2AugmentedBenchmark
 from src.gmdataset import GMDataset, get_dataloader
-from ngm import Net
+from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model

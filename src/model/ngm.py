@@ -1,17 +1,17 @@
 import logging
-from feature_extractor import ResNet18_final as CNN
-from spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
-from feature_align import feature_align
-from affinity_layer import InnerProductWithWeightsAffinity
+from src.model.feature_extractor import ResNet18_final as CNN
+from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
+from utils.feature_align import feature_align
+from src.model.affinity_layer import InnerProductWithWeightsAffinity
 import torch
 import torch.nn as nn
 from utils.pad_tensor import pad_tensor
 from utils.factorize_graph_matching import construct_aff_mat, construct_sparse_aff_mat
-from gnn import PYGNNLayer
-from sinkhorn import Sinkhorn
-from soft_topk import soft_topk, greedy_perm
-from hungarian import hungarian
-from afau import Encoder
+from src.model.gnn import PYGNNLayer
+from src.model.sinkhorn import Sinkhorn
+from src.model.soft_topk import soft_topk, greedy_perm
+from utils.hungarian import hungarian
+from src.model.afau import Encoder
 
 from utils.visualize import *
 

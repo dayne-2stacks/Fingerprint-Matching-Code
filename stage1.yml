@@ -1,7 +1,4 @@
 train:
-  stage1_epochs: 10
-  stage2_epochs: 5
-  stage3_epochs: 20
   start_epoch: 0         # Set to a positive integer to resume from a checkpoint
   num_iterations: 25    # Iterations per epoch
   BATCH_SIZE: 1
@@ -11,7 +8,7 @@ train:
   BACKBONE_LR: 1.e-4      # Learning rate for backbone parameters
   K_LR: 2.e-3             # Learning rate for k-regression (AFA) modules
   LR_DECAY: 0.5          # LR decay factor
-  patience: 75           # Early stopping patience (in epochs)
-  num_epochs: 1000
+  patience: 5           # Early stopping patience (in epochs)
+  num_epochs: 9
 ngm:
   REGRESSION: false       # If true, use predicted k in stage 3; otherwise, use ground truth k
