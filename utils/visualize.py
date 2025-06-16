@@ -126,7 +126,7 @@ def visualize_pyg_batch(data, filename="photos/batch_graph.png"):
     
 
 
-def visualize_match(img0, img1, kp0, kp1, matches, prefix=""):
+def visualize_match(img0, img1, kp0, kp1, matches, prefix="", filename="matching_result"):
     """
     Visualizes keypoints and matches between two images and saves the results.
     img0, img1: images as numpy arrays (grayscale or color)
@@ -149,5 +149,5 @@ def visualize_match(img0, img1, kp0, kp1, matches, prefix=""):
     print("Number of matches found:", len(matches))
 
     img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
-    cv2.imwrite(f"{prefix}matching_result.jpg", img_matches)
-    print(f"Matching result saved as '{prefix}matching_result.jpg'.")
+    cv2.imwrite(f"{prefix}{filename}.jpg", img_matches)
+    print(f"Matching result saved as '{prefix}{filename}.jpg'.")
