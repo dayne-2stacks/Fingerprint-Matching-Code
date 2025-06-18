@@ -181,3 +181,5 @@ result/*
 
 dataset
 dataset/*
+.nfs*
+logs/*
