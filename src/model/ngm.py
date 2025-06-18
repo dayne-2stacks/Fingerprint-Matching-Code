@@ -1,17 +1,17 @@
 import logging
-from feature_extractor import ResNet18_final as CNN
-from spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
-from feature_align import feature_align
-from affinity_layer import InnerProductWithWeightsAffinity
+from src.model.feature_extractor import ResNet18_final as CNN
+from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
+from utils.feature_align import feature_align
+from src.model.affinity_layer import InnerProductWithWeightsAffinity
 import torch
 import torch.nn as nn
 from utils.pad_tensor import pad_tensor
 from utils.factorize_graph_matching import construct_aff_mat, construct_sparse_aff_mat
-from gnn import PYGNNLayer
-from sinkhorn import Sinkhorn
-from soft_topk import soft_topk, greedy_perm
-from hungarian import hungarian
-from afau import Encoder
+from src.model.gnn import PYGNNLayer
+from src.model.sinkhorn import Sinkhorn
+from src.model.soft_topk import soft_topk, greedy_perm
+from utils.hungarian import hungarian
+from src.model.afau import Encoder
 
 from utils.visualize import *
 
@@ -47,12 +47,12 @@ SK_EMB=1
 GNN_FEAT = [16, 16, 16]
 GNN_LAYER = 3
 EDGE_EMB=False
-BATCH_SIZE=16
+BATCH_SIZE=12
 
 UNIV_SIZE=600
-SK_ITER_NUM=25
+SK_ITER_NUM=10
 SK_EPSILON=1e-10
-K_FACTOR=5.
+K_FACTOR=50.
 
 
 
@@ -132,8 +132,10 @@ class Net(CNN):
         
         self.sinkhorn = Sinkhorn(max_iter=SK_ITER_NUM, tau=self.tau, epsilon=SK_EPSILON)
         self.regression = regression
+        if self.regression:
+            print("Improving K")
         self.mean_k = True
-        self.trainings=True
+        
         
         self.k_params_id = []
     # if self.regression:
@@ -163,7 +165,8 @@ class Net(CNN):
         {'params': self.final_row.parameters()},
         {'params': self.final_col.parameters()}
         ]
-
+ 
+    
     def forward(self, data_dict, regression=True):
         images = data_dict['images'] # Loaded from custom dataset
         points = data_dict['Ps'] # Pore locations
@@ -208,7 +211,7 @@ class Net(CNN):
             U = concat_features(feature_align(nodes, point, num_p, self.rescale), num_p)
             F = concat_features(feature_align(edges, point, num_p, self.rescale), num_p)
             node_features = torch.cat((U, F), dim=1)
-            node_feature_list.append(node_features)
+            node_feature_list.append(node_features.detach())
             # node_features = self.proj(node_features)
             graph.x = node_features
             
@@ -361,16 +364,19 @@ class Net(CNN):
         else:
             ks = gt_ks / min_point_tensor 
             
-        if self.trainings:
+        if self.training:
+            print("Training mode, using ground truth ks")
             _, ss_out = soft_topk(ss, gt_ks.view(-1), SK_ITER_NUM, self.tau, n_points[idx1], n_points[idx2],
                                 True)
         else:
+            print("Inference mode, using predicted ks")
             _, ss_out = soft_topk(ss, ks.view(-1) * min_point_tensor, SK_ITER_NUM, self.tau, n_points[idx1],
                                     n_points[idx2], True)
 
         supervised_ks = gt_ks / min_point_tensor
-        #print("Groundtruth:", gt_ks)
-        #print("Supervised", supervised_ks)
+        # print("predicted ks:", ks[0] * min_point_tensor)
+        # print("Groundtruth:", gt_ks[0])
+        # print("Supervised", supervised_ks)
 
         if self.regression:
             ks_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
@@ -378,7 +384,9 @@ class Net(CNN):
         else:
             ks_loss = 0.
             ks_error = 0.
-
+        
+        print("KS Loss:", ks_loss.item())
+        print("KS Error:", ks_error.item())
         x = hungarian(ss_out, n_points[idx1], n_points[idx2])
         top_indices = torch.argsort(x.mul(ss_out).reshape(x.shape[0], -1), descending=True, dim=-1)
         x = torch.zeros(ss_out.shape, device=ss_out.device)

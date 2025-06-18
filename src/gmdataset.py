@@ -10,6 +10,7 @@ from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
 from utils.augmentation import augment_image
+from itertools import combinations
 
 
 
@@ -24,7 +25,7 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=123
-BATCH_SIZE=16
+BATCH_SIZE=12
 DATALOADER_NUM=6
 
 
@@ -85,8 +86,7 @@ class GMDataset(Dataset):
         return pyg_graph
 
     def get_pair(self, idx, cls):
-        #anno_pair, perm_mat = self.bm.get_pair(self.cls if self.cls is not None else
-        #                                       (idx % (BATCH_SIZE * len(self.classes))) // BATCH_SIZE)
+
         # select a random class
         cls_num = random.randrange(0, len(self.classes))
         # Get 2 ids from the selected class
@@ -101,19 +101,23 @@ class GMDataset(Dataset):
         original_img = cv2.imread(self.bm.get_path(f"{anno_pair[0]['cls']}"))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
-        # Generate two distinct augmented versions of the same image
-        img1, annos1 = augment_image(original_img, original_annos)
-        img2, annos2 = augment_image(original_img, original_annos)
-        
-        # save_path_1 = f"augmented_pair_{idx}_1.jpg"
-        # save_path_2 = f"augmented_pair_{idx}_2.jpg"
-        # cv2.imwrite(save_path_1, img1)
-        # cv2.imwrite(save_path_2, img2)
+        n_common = 0
+        while n_common <= 3:
+            # Generate two distinct augmented versions of the same image
+            img1, annos1 = augment_image(original_img, original_annos)
+            img2, annos2 = augment_image(original_img, original_annos)
             
-        # Find common keypoints (by label)
-        labels1 = set(a[0] for a in annos1)
-        labels2 = set(a[0] for a in annos2)
-        common_labels = labels1.intersection(labels2)
+            # save_path_1 = f"augmented_pair_{idx}_1.jpg"
+            # save_path_2 = f"augmented_pair_{idx}_2.jpg"
+            # cv2.imwrite(save_path_1, img1)
+            # cv2.imwrite(save_path_2, img2)
+            
+            
+            # Find common keypoints (by label)
+            labels1 = set(a[0] for a in annos1)
+            labels2 = set(a[0] for a in annos2)
+            common_labels = labels1.intersection(labels2)
+            n_common = len(common_labels)
 
         # Update annotations: if a keypoint is not common, change its label to "outlier"
         annos1_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos1]
@@ -126,7 +130,7 @@ class GMDataset(Dataset):
         # Create permutation matrix based on matching labels
         sorted_labels = sorted(common_labels)
         label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
-        n_common = len(common_labels)
+        
         perm_mat = np.eye(n_common, dtype=np.float32)
 
 
@@ -225,7 +229,134 @@ class GMDataset(Dataset):
 
         return ret_dict
 
+class TestDataset(Dataset):
+    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM'):
+        self.name = name
+        self.bm = bm
+        self.using_all_graphs = using_all_graphs
+        self.obj_size = self.bm.obj_resize
+        self.test = True if self.bm.sets == 'test' else False
+        self.cls = None if cls in ['none', 'all'] else cls
 
+        if self.cls is None:
+                self.classes = self.bm.classes
+        else:
+            self.classes = [self.cls]
+
+        self.problem_type = problem
+        self.img_num_list = self.bm.compute_img_num(self.classes[0])
+
+       
+        self.id_combination, self.length = self.bm.get_rand_id_combination()
+        self.length_list = []
+        for cls in self.classes:
+            cls_length = self.bm.compute_length(cls)
+            self.length_list.append(cls_length)
+       
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if self.problem_type == '2GM':
+            return self.get_pair(idx, self.cls)
+        elif self.problem_type == 'MGM':
+            return self.get_multi(idx, self.cls)
+        elif self.problem_type == 'MGM3':
+            return self.get_multi_cluster(idx)
+        else:
+            raise NameError("Unknown problem type: {}".format(self.problem_type))
+
+    @staticmethod
+    def to_pyg_graph(A, P):
+        rescale = max(RESCALE)
+
+        edge_feat = 0.5 * (np.expand_dims(P, axis=1) - np.expand_dims(P, axis=0)) / rescale + 0.5  # from Rolink's paper
+        edge_index = np.nonzero(A)
+        edge_attr = edge_feat[edge_index]
+
+        edge_attr = np.clip(edge_attr, 0, 1)
+        assert (edge_attr > -1e-5).all(), P
+
+        o3_A = np.expand_dims(A, axis=0) * np.expand_dims(A, axis=1) * np.expand_dims(A, axis=2)
+        hyperedge_index = np.nonzero(o3_A)
+
+        pyg_graph = pyg.data.Data(
+            x=torch.tensor(P / rescale).to(torch.float32),
+            edge_index=torch.tensor(np.array(edge_index), dtype=torch.long),
+            edge_attr=torch.tensor(edge_attr).to(torch.float32),
+            hyperedge_index=torch.tensor(np.array(hyperedge_index), dtype=torch.long),
+        )
+        return pyg_graph
+        
+    def get_pair(self, idx, cls):
+        
+        # select a random class
+        cls_num = random.randrange(0, len(self.classes))
+        # Get 2 ids from the selected class
+        ids = list(self.id_combination[cls_num][idx % self.length_list[cls_num]])
+        
+        anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
+        perm_mat = perm_mat_[(0, 1)].toarray()
+        while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.sum() == 0:
+            anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
+            perm_mat = perm_mat_[(0, 1)].toarray()
+        
+
+        cls = [anno['cls'] for anno in anno_pair]
+        P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
+        P2 = [(kp['x'], kp['y']) for kp in anno_pair[1]['kpts']]
+
+        n1, n2 = len(P1), len(P2)
+        univ_size = [anno['univ_size'] for anno in anno_pair]
+
+        P1 = np.array(P1)
+        P2 = np.array(P2)
+
+        A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+        if TGT_GRAPH_CONSTRUCT == 'same':
+            G2 = perm_mat.transpose().dot(G1)
+            H2 = perm_mat.transpose().dot(H1)
+            A2 = G2.dot(H2.transpose())
+            e2 = e1
+        else:
+            A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+
+        pyg_graph1 = self.to_pyg_graph(A1, P1)
+        pyg_graph2 = self.to_pyg_graph(A2, P2)
+
+        ret_dict = {'Ps': [torch.Tensor(x) for x in [P1, P2]],
+                    'ns': [torch.tensor(x) for x in [n1, n2]],
+                    'es': [torch.tensor(x) for x in [e1, e2]],
+                    'gt_perm_mat': perm_mat,
+                    'Gs': [torch.Tensor(x) for x in [G1, G2]],
+                    'Hs': [torch.Tensor(x) for x in [H1, H2]],
+                    'As': [torch.Tensor(x) for x in [A1, A2]],
+                    'pyg_graphs': [pyg_graph1, pyg_graph2],
+                    'cls': [str(x) for x in cls],
+                    'id_list': id_list,
+                    'univ_size': [torch.tensor(int(x)) for x in univ_size],
+                    }
+        
+        
+
+        imgs = [cv2.imread(self.bm.get_path(f"{anno['cls']}")) for anno in anno_pair]
+        if imgs[0] is not None:
+            trans = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(NORM_MEANS, NORM_STD)
+                    ])
+            imgs = [trans(img) for img in imgs]
+            ret_dict['images'] = imgs
+        elif 'feat' in anno_pair[0]['kpts'][0]:
+            feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
+            feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
+            ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
+
+        return ret_dict
+    
+    
+    
+    
 class QAPDataset(Dataset):
     def __init__(self, name, length, cls=None, **args):
         self.name = name

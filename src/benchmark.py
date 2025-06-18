@@ -96,7 +96,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         data_list = []
         for keys in ids:
             obj_dict = dict()
-            boundbox = self.data_dict[keys]['bounds']
+            # boundbox = self.data_dict[keys]['bounds']
             img_file = self.data_dict[keys]['path']
             with Image.open(str(img_file)) as img:
                 #obj = img.resize(self.obj_resize, resample=Image.BICUBIC,
@@ -246,7 +246,81 @@ class L3SFV2AugmentedBenchmark(Benchmark):
                         if self.data_dict[id_pair[0]]['cls'] == clss:
                             length += 1
         return length
+    
+    def get_rand_id_combination(self, num=2, combinations_per_class=1):
+        """
+        Generate combinations by selecting one ID from different classes
+        
+        Args:
+            
+            num: Number of IDs to combine (default 2 for pairs)
+            combinations_per_class: Number of combinations to generate per class
+            
+        Returns:
+            id_combination_list: Nested list of ID combinations
+            length: Total number of combinations
+        """
+        from collections import defaultdict
+        length = 0
+        id_combination_list = []
+        
+        with open(self.data_list_path) as f1:
+            data_id = json.load(f1)
+        
+        if len(data_id) < 2:
+            # Not enough data to sample
+            return [], 0
 
+        available_ids = [id for id in data_id if id in self.data_dict]
+        print(f"Available IDs: {len(available_ids)}")
+        
+        # Group IDs by class
+        class_to_ids = defaultdict(list)
+        for id in available_ids:
+            cls = self.data_dict[id].get('cls', '')
+            class_to_ids[cls].append(id)
+        
+        classes = list(class_to_ids.keys())
+        print(f"Found {len(classes)} classes")
+        
+        # Create cross-class combinations
+        for base_cls in classes:
+            # For each class, create combinations with other classes
+            base_ids = class_to_ids[base_cls]
+            other_classes = [c for c in classes if c != base_cls]
+            
+            if len(other_classes) < num-1:
+                # Not enough other classes for combination
+                continue
+            
+            # Create combinations_per_class random combinations
+            class_combinations = []
+            for _ in range(combinations_per_class):
+                # Select random base ID
+                if not base_ids:
+                    continue
+                base_id = random.choice(base_ids)
+                
+                # Select random other classes and IDs
+                selected_classes = random.sample(other_classes, num-1)
+                combination = [base_id]
+                
+                # Add one ID from each selected class
+                for cls in selected_classes:
+                    if class_to_ids[cls]:
+                        combination.append(random.choice(class_to_ids[cls]))
+                
+                # Ensure we have exactly num IDs
+                if len(combination) == num:
+                    class_combinations.append(tuple(combination))
+            
+            if class_combinations:
+                id_combination_list.append(class_combinations)
+                length += len(class_combinations)
+                print(f"Base class {base_cls}: Added {len(class_combinations)} combinations")
+        
+        print(f"Total combinations: {length}")
+        return id_combination_list, length
 # ------------------------------------------------------------------------------
 # Example usage:
 if __name__ == "__main__":

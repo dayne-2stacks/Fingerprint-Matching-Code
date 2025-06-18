@@ -24,7 +24,7 @@ class Encoder(nn.Module):
     AFA-U graph attention module to generate bipartite node embeddings.
     """
     model_params = {
-        'embedding_dim': 400,
+        'embedding_dim': 600,
         'head_num': 16,
         'qkv_dim': 16,
         'ff_hidden_dim': 256,
@@ -120,6 +120,7 @@ class EncodingBlock(nn.Module):
         # input2.shape: (batch, col_cnt, embedding)
         # cost_mat.shape: (batch, row_cnt, col_cnt)
         head_num = self.model_params['head_num']
+       
 
         q = reshape_by_heads(self.Wq(row_emb), head_num=head_num)
         # q shape: (batch, head_num, row_cnt, qkv_dim)

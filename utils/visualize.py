@@ -126,7 +126,7 @@ def visualize_pyg_batch(data, filename="photos/batch_graph.png"):
     
 
 
-def visualize_match(img0, img1, kp0, kp1, matches, prefix=""):
+def visualize_match(img0, img1, kp0, kp1, matches, prefix="", filename="matching_result"):
     """
     Visualizes keypoints and matches between two images and saves the results.
     img0, img1: images as numpy arrays (grayscale or color)
@@ -149,5 +149,31 @@ def visualize_match(img0, img1, kp0, kp1, matches, prefix=""):
     print("Number of matches found:", len(matches))
 
     img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
-    cv2.imwrite(f"{prefix}matching_result.jpg", img_matches)
-    print(f"Matching result saved as '{prefix}matching_result.jpg'.")
+    cv2.imwrite(f"{prefix}{filename}.jpg", img_matches)
+    print(f"Matching result saved as '{prefix}{filename}.jpg'.")
+
+
+NORM_MEANS= [0.485, 0.456, 0.406] 
+NORM_STD=[0.229, 0.224, 0.225]
+
+def to_grayscale_cv2_image(tensor, mean=NORM_MEANS, std=NORM_STD):
+    """
+    Converts a CHW torch tensor (normalized in [0,1] or by mean/std) 
+    to a uint8 OpenCV grayscale image.
+    """
+    tensor = tensor.detach().cpu()
+
+    # 1) Undo Normalize(mean,std) if provided
+    if mean is not None and std is not None:
+        # assume mean/std are sequences of length = channels
+        m = torch.tensor(mean).view(-1, 1, 1)
+        s = torch.tensor(std).view(-1, 1, 1)
+        tensor = tensor * s + m
+
+    # 2) CHW → HWC and scale to [0,255]
+    img = tensor.permute(1, 2, 0).numpy()
+    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+    # 3) RGB → Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    return gray

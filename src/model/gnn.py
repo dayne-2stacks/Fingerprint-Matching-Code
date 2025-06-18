@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch_sparse import spmm
 from torch_geometric.nn import MessagePassing, GCNConv, GINConv, SAGEConv
 
-from sinkhorn import Sinkhorn
+from src.model.sinkhorn import Sinkhorn
 
 from collections import Iterable
 

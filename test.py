@@ -1,75 +1,145 @@
 #!/usr/bin/env python
-import os
+
+from pathlib import Path
 import cv2
 import numpy as np
+
 import torch
-import random
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-import torch_geometric as pyg
-from utils.augmentation import augment_image
-from utils.build_graphs import build_graphs
+
+import os
+
 from src.benchmark import L3SFV2AugmentedBenchmark
-from src.gmdataset import GMDataset
+from src.gmdataset import TestDataset, get_dataloader
+from src.model.ngm import Net
+from utils.data_to_cuda import data_to_cuda
+
+from utils.models_sl import load_model
+from utils.visualize import visualize_match, visualize_stochastic_matrix, to_grayscale_cv2_image
+from src.evaluation_metric import matching_accuracy
+from utils.matching import build_matches
 
 
 
 
-# -------------------------------
-# GMDataset Class (as provided)
-# -------------------------------
-RESCALE = (320, 240)
-SRC_GRAPH_CONSTRUCT = "tri"
-TGT_GRAPH_CONSTRUCT = "same"
-SYM_ADJACENCY = True
-NORM_MEANS = [0.485, 0.456, 0.406]
-NORM_STD = [0.229, 0.224, 0.225]
-MAX_PROB_SIZE = -1
-TYPE = '2GM'
-FP16 = False
-RANDOM_SEED = 123
-BATCH_SIZE = 8
-DATALOADER_NUM = 6
 
+dataset_len = 640
+
+# File paths
 train_root = 'dataset/Synthetic'
-benchmark = L3SFV2AugmentedBenchmark(
-        sets='test',
-        obj_resize=(512, 512),
-        train_root=train_root
-    )
+OUTPUT_PATH = "result1"
+PRETRAINED_PATH = "result1/params/best_model.pt" 
+
+
+test_bm =  L3SFV2AugmentedBenchmark(
+    sets='test',
+    obj_resize=(320, 240),
+    train_root=train_root,
+    filter="inclusion"
+)
 
 
 
-# -------------------------------
-# Testing the Dataset
-# -------------------------------
+test_dataset = TestDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
+print(f"Test dataset length: {len(test_dataset)}")
 
-def main():
-    # Create a dummy image file "dummy.jpg" in the current directory.
-    dummy_img = np.full((240, 320, 3), 255, dtype=np.uint8)  # white image
-    dummy_img_path = "dummy.jpg"
-    cv2.imwrite(dummy_img_path, dummy_img)
+test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)
+
+# =====================================================
+# Model, Loss, and Device Setup
+# =====================================================
+model = Net(regression=True)
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 
-    # Instantiate the dataset
-    dataset = GMDataset(name="GMDataset", bm=benchmark, length=640, cls=None, problem="2GM")
+# =====================================================
+# Checkpoint Loading (if start_epoch > 0)
+# =====================================================
+if len(PRETRAINED_PATH) > 0:
+    model_path = PRETRAINED_PATH
+
+
+if os.path.exists(model_path):
+    print(f"Loading model weights from {model_path} before training loop...")
+    load_model(model, model_path)
+            
+
+
+# =====================================================
+#  Evaluate on a Sample
+# =====================================================
+single_sample = next(iter(test_dataloader))
+single_sample = data_to_cuda(single_sample)
+print(single_sample.keys())
+
+
+model.eval()
+with torch.no_grad():
+    print("Running model inference on a single sample...")
+    outputs = model(single_sample)
     
-    # Get one sample from the dataset
-    sample = dataset[0]
-    
-    # Print out the keys and types in the returned sample
-    print("Sample keys and types:")
-    for key, value in sample.items():
-        print(f"  {key}: {type(value)}")
-    
-    # Print shapes of the augmented images
-    print("\nAugmented image shapes:")
-    for i, img in enumerate(sample['images']):
-        print(f"  Image {i+1}: {img.shape}")
+print("Model outputs keys:", outputs.keys())
+acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
+if isinstance(acc, torch.Tensor):
+    if acc.numel() > 1:  # Check if tensor has multiple elements
+        acc = acc.mean().item()  # Take the mean before converting to scalar
+    else:
+        acc = acc.item()
         
+print("Matching accuracy:", acc)
 
-    # Clean up: remove the dummy image file
-    os.remove(dummy_img_path)
+                
+    
+# Explicitly select the first sample from the batch
+if 'Ps' in single_sample:
+    kp0 = single_sample['Ps'][0][0].cpu().numpy()
+    kp1 = single_sample['Ps'][1][0].cpu().numpy()
+    print("Ps in sample")
+else:
+    kp0 = np.array([[100, 100], [150, 150], [200, 200]])
+    kp1 = np.array([[110, 110], [160, 160], [210, 210]])
 
-if __name__ == '__main__':
-    main()
+print("Number of keypoints in image0 (kp0):", len(kp0))
+print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
+
+# Ensure keypoints lists for OpenCV are correctly formed:
+cv2_kp0 = [cv2.KeyPoint(float(x[0]), float(x[1]), 1) for x in kp0]
+cv2_kp1 = [cv2.KeyPoint(float(x[0]), float(x[1]), 1) for x in kp1]
+
+ds_mat = outputs["ds_mat"].cpu().numpy()[0]
+per_mat = outputs["perm_mat"].cpu().numpy()[0]
+
+matches = build_matches(ds_mat, per_mat)
+    
+print(len(single_sample["images"]))
+
+if "id_list" in single_sample:
+    img0 = single_sample["images"][0][0]
+    img1 = single_sample["images"][1][0]
+else:
+    img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
+    img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
+    print("Using fallback image paths.")
+
+
+
+
+img0= to_grayscale_cv2_image(img0)
+img1 = to_grayscale_cv2_image(img1)
+
+visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/")
+visualize_stochastic_matrix(ds_mat, "ds_mat")
+print("Accuracy: ", acc)
+
+# Add final visualizations to TensorBoard
+if len(matches) > 0:
+    match_path = f"photos/final_match.jpg"
+    visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/", filename="final_match")
+    
+    if os.path.exists(match_path):
+        match_img = cv2.imread(match_path)
+        match_img = cv2.cvtColor(match_img, cv2.COLOR_BGR2RGB)
+
+
+print("Accuracy: ", acc)

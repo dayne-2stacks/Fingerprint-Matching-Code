@@ -183,3 +183,4 @@ dataset
 dataset/*
 .nfs*
 logs/*
+events.*

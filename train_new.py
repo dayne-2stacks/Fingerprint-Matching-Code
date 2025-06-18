@@ -7,11 +7,12 @@ import torch
 import torch.optim as optim
 from src.benchmark import L3SFV2AugmentedBenchmark
 from src.gmdataset import GMDataset, get_dataloader
-from ngm import Net
+from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from src.loss_func import PermutationLoss
 from utils.models_sl import save_model, load_model
 from src.parallel import DataParallel
+from utils.matching import build_matches
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -220,14 +221,7 @@ else:
 cv2_kp0 = [cv2.KeyPoint(x=float(k[0]), y=float(k[1]), size=1) for k in kp0]
 cv2_kp1 = [cv2.KeyPoint(x=float(k[0]), y=float(k[1]), size=1) for k in kp1]
 
-matches = []
-for i in range(ds_mat.shape[0]):
-    valid_indices = np.where(per_mat[i] == 1)[0]
-    if valid_indices.size == 0:
-        continue
-    best_index = valid_indices[np.argmax(ds_mat[i, valid_indices])]
-    distance = float(ds_mat[i, best_index])
-    matches.append(cv2.DMatch(_queryIdx=i, _trainIdx=best_index, _imgIdx=0, _distance=distance))
+matches = build_matches(ds_mat, per_mat)
 
 if 'img0_path' in single_sample and 'img1_path' in single_sample:
     img0 = cv2.imread(single_sample['img0_path'])
