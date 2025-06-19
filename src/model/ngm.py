@@ -389,8 +389,6 @@ class Net(CNN):
             ks_loss = 0.
             ks_error = 0.
         
-        print("KS Loss:", ks_loss.item())
-        print("KS Error:", ks_error.item())
         x = hungarian(ss_out, n_points[idx1], n_points[idx2])
         top_indices = torch.argsort(x.mul(ss_out).reshape(x.shape[0], -1), descending=True, dim=-1)
         x = torch.zeros(ss_out.shape, device=ss_out.device)
