@@ -1,0 +1,13 @@
+no change     /home/azim.usf/miniconda3/condabin/conda
+no change     /home/azim.usf/miniconda3/bin/conda
+no change     /home/azim.usf/miniconda3/bin/conda-env
+no change     /home/azim.usf/miniconda3/bin/activate
+no change     /home/azim.usf/miniconda3/bin/deactivate
+no change     /home/azim.usf/miniconda3/etc/profile.d/conda.sh
+no change     /home/azim.usf/miniconda3/etc/fish/conf.d/conda.fish
+no change     /home/azim.usf/miniconda3/shell/condabin/Conda.psm1
+no change     /home/azim.usf/miniconda3/shell/condabin/conda-hook.ps1
+no change     /home/azim.usf/miniconda3/lib/python3.10/site-packages/xontrib/conda.xsh
+no change     /home/azim.usf/miniconda3/etc/profile.d/conda.csh
+no change     /home/azim.usf/.bashrc
+No action taken.
