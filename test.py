@@ -9,7 +9,7 @@ import torch
 import os
 
 from src.benchmark import L3SFV2AugmentedBenchmark
-from src.gmdataset import TestDataset, get_dataloader
+from src.gmdataset import TestDataset,GMDataset, get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 
@@ -26,8 +26,8 @@ dataset_len = 640
 
 # File paths
 train_root = 'dataset/Synthetic'
-OUTPUT_PATH = "result1"
-PRETRAINED_PATH = "result1/params/best_model.pt" 
+OUTPUT_PATH = "results/binary-classifier"
+PRETRAINED_PATH = "results/base/params/best_model.pt"
 
 
 test_bm =  L3SFV2AugmentedBenchmark(

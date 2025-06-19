@@ -417,3 +417,64 @@ def rand_index(pred_clusters: Tensor, gt_classes: Tensor) -> Tensor:
     unmatched_pairs = torch.logical_xor(pred_pairs, gt_pairs).to(dtype=torch.float)
     rand_index = 1 - torch.sum(unmatched_pairs, dim=(-1,-2)) / (num_instances * (num_instances - 1))
     return rand_index
+
+
+def generate_roc_curve(genuine_scores: Tensor, impostor_scores: Tensor, save_path: str = None):
+    """Generate ROC curve for genuine vs impostor matching evaluation.
+
+    This utility computes false positive rates (FPR) and true positive rates
+    (TPR) for a series of thresholds given two groups of scores:
+    ``genuine_scores`` produced by matching images of the same identity and
+    ``impostor_scores`` produced by matching different identities.
+
+    Parameters
+    ----------
+    genuine_scores : Tensor
+        Similarity scores for genuine pairs. Higher scores should indicate
+        a better match.
+    impostor_scores : Tensor
+        Similarity scores for impostor pairs.
+    save_path : str, optional
+        If provided, the ROC curve will be plotted and saved to this path.
+
+    Returns
+    -------
+    tuple
+        ``(fpr, tpr, roc_auc)`` where ``fpr`` and ``tpr`` are numpy arrays of
+        false positive and true positive rates respectively, and ``roc_auc`` is
+        the area under the ROC curve.
+    """
+
+    import numpy as np
+    from sklearn.metrics import roc_curve, auc
+
+    # Convert tensors to numpy arrays on CPU
+    genuine_np = genuine_scores.detach().cpu().numpy().ravel()
+    impostor_np = impostor_scores.detach().cpu().numpy().ravel()
+
+    scores = np.concatenate([genuine_np, impostor_np])
+    labels = np.concatenate([
+        np.ones_like(genuine_np, dtype=np.int32),
+        np.zeros_like(impostor_np, dtype=np.int32),
+    ])
+
+    fpr, tpr, _ = roc_curve(labels, scores)
+    roc_auc = auc(fpr, tpr)
+
+    if save_path is not None:
+        import matplotlib.pyplot as plt
+
+        plt.figure()
+        plt.plot(fpr, tpr, color="darkorange", lw=2,
+                 label=f"ROC curve (area = {roc_auc:.4f})")
+        plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title("Receiver Operating Characteristic")
+        plt.legend(loc="lower right")
+        plt.savefig(save_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+
+    return fpr, tpr, roc_auc

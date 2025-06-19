@@ -87,8 +87,8 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "result1"
-    PRETRAINED_PATH = "" 
+    OUTPUT_PATH = "results/binary-classifier"
+    PRETRAINED_PATH = "results/base/params/best_model.pt" 
 
     # =====================================================
     # Setup Logging
@@ -280,10 +280,10 @@ for file in config_files:
             param_group['lr'] = initial_k_lr
             
     
-    best_model_path = str(checkpoint_path / "best_model.pt")
-    if os.path.exists(best_model_path):
-        print(f"Loading best model weights from {best_model_path} before training loop...")
-        load_model(model, best_model_path)
+    # best_model_path = str(checkpoint_path / "best_model.pt")
+    # if os.path.exists(best_model_path):
+    #     print(f"Loading best model weights from {best_model_path} before training loop...")
+    #     load_model(model, best_model_path)
                 
     
 
