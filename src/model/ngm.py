@@ -3,6 +3,7 @@ from src.model.feature_extractor import ResNet18_final as CNN
 from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
 from utils.feature_align import feature_align
 from src.model.affinity_layer import InnerProductWithWeightsAffinity
+from src.model.match_classifier import MatchClassifier
 import torch
 import torch.nn as nn
 from utils.pad_tensor import pad_tensor
@@ -165,6 +166,9 @@ class Net(CNN):
         {'params': self.final_row.parameters()},
         {'params': self.final_col.parameters()}
         ]
+
+        # Binary match classifier using aggregated similarity scores
+        self.match_cls = MatchClassifier()
  
     
     def forward(self, data_dict, regression=True):
@@ -393,7 +397,10 @@ class Net(CNN):
         x = greedy_perm(x, top_indices, ks.view(-1) * min_point_tensor)
         s_list.append(ss_out)
         x_list.append(x)
-        indices.append((idx1, idx2))  
+        indices.append((idx1, idx2))
+
+        # Compute match probability using original similarity scores
+        match_prob = self.match_cls(s, x)
         
         # print(x)
         # print(ss_out)
@@ -403,7 +410,10 @@ class Net(CNN):
                 'ds_mat': s_list[0],
                 'perm_mat': x_list[0],
                 'ks_loss': ks_loss,
-                'ks_error': ks_error
+                'ks_error': ks_error,
+                'match_prob': match_prob
             })
+        
+        print("Match probability:", match_prob[0].item())
         
         return data_dict
