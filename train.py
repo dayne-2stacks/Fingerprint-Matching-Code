@@ -11,8 +11,9 @@ import os
 from torch.utils.tensorboard import SummaryWriter
 
 
-from src.benchmark import L3SFV2AugmentedBenchmark
-from src.gmdataset import GMDataset, get_dataloader
+from src.train.data_loader import build_dataloaders
+from src.train.training_loop import train_epoch
+from src.train.evaluation import validate_epoch, test_evaluation
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
@@ -102,30 +103,7 @@ for file in config_files:
     # =====================================================
     # Dataset and Dataloader
     # =====================================================
-    benchmark = L3SFV2AugmentedBenchmark(
-        sets='train',
-        obj_resize=(320, 240),
-        train_root=train_root
-    )
-    
-    test_bm =  L3SFV2AugmentedBenchmark(
-        sets='test',
-        obj_resize=(320, 240),
-        train_root=train_root
-    )
-    val_bm = L3SFV2AugmentedBenchmark(
-        sets='val',
-        obj_resize=(320, 240),
-        train_root=train_root
-    )
-
-    image_dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
-    test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
-    val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
-
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=False)
-    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)
-    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=False)
+    dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -295,201 +273,46 @@ for file in config_files:
         logger.info("-" * 50)
         print("Epoch {}/{}".format(epoch, start_epoch + num_epochs - 1))
         print("-" * 10)
-        
+
         model.train()
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
         if optimizer_k is not None:
             print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))
-        
-        # Log learning rates to TensorBoard
+
         for i, param_group in enumerate(optimizer.param_groups):
             writer.add_scalar(f'Learning_Rate/group_{i}', param_group['lr'], epoch)
-            
+
         if optimizer_k is not None:
             for i, param_group in enumerate(optimizer_k.param_groups):
                 writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
-        
-        epoch_loss_sum = 0.0
-        epoch_total_loss_sum = 0.0 
-        running_ks_loss = 0.0
-        running_ks_error = 0.0
-        epoch_accuracy_sum = 0.0
-        
-        iter_num = 0
-        for i in range(3):
-            for batch_idx, batch in enumerate(dataloader):
-                iter_num += 1
-                
-                batch = data_to_cuda(batch)
-                
-                # Zero the parameter gradients 
-                optimizer.zero_grad()
-                if optimizer_k is not None:
-                    optimizer_k.zero_grad()
-                
-                outputs = model(batch)
-                
-                
-                # -------------- Check ds mat ---------------------
-                # # Print a summary of the outputs to see if they vary across iterations
-                # ds_mat = outputs["ds_mat"]
-                # print(f"Iteration {batch_idx}: ds_mat mean = {ds_mat.mean().item():.4f}, std = {ds_mat.std().item():.4f}")
-                # -------------- Check ds mat ---------------------
-                
 
-                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-                ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
-                
-                
-                loss_value = loss.item()
-                ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss)
-                total_loss_value = total_loss.item()
-                
-                # Accumulate all losses consistently
-                epoch_loss_sum += loss_value
-                epoch_total_loss_sum += total_loss_value
-                running_ks_loss += ks_loss_value
-                running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
-                
-                total_loss.backward()
-                
-                # Gradient clipping
-                if stage == 1:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)    
-                optimizer.step()
-                if optimizer_k is not None:
-                    optimizer_k.step()
-                
-                # Compute accuracy (if desired)
-                acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-                print("Accuracy", acc)
-                # Convert tensor to scalar value if needed
-                if isinstance(acc, torch.Tensor):
-                    if acc.numel() > 1:  # Check if tensor has multiple elements
-                        acc = acc.mean().item()  # Take the mean before converting to scalar
-                    else:
-                        acc = acc.item()
-                epoch_accuracy_sum += acc
-                
-                # Log every few iterations to TensorBoard
-                global_step = (epoch - start_epoch) * len(dataloader) * 3 + i * len(dataloader) + batch_idx
-                if iter_num % 5 == 0:
-                    writer.add_scalar('Train/Loss_Batch', loss_value, global_step)
-                    writer.add_scalar('Train/KS_Loss_Batch', ks_loss_value, global_step)
-                    writer.add_scalar('Train/Total_Loss_Batch', total_loss_value, global_step)
-                    writer.add_scalar('Train/Accuracy_Batch', acc, global_step)
-                
-                if iter_num % 5 == 0:
-                    # Calculate running averages
-                    avg_loss = epoch_loss_sum / iter_num
-                    avg_ks_loss = running_ks_loss / iter_num
-                    avg_total_loss = epoch_total_loss_sum / iter_num
-                    
-                    if "ks_loss" in outputs and optimizer_k is not None:
-                        log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
-                                  f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
-                                  f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}")
-                        print(log_msg)
-                        logger.info(log_msg)
-                    else:
-                        log_msg = f"Epoch: {epoch}, Iter: {iter_num}, Loss: {avg_loss:.4f}, Acc: {acc:.4f}"
-                        print(log_msg)
-                        logger.info(log_msg)
-            
-        avg_epoch_loss = epoch_loss_sum / iter_num
-        avg_ks_loss = running_ks_loss / iter_num
-        avg_total_loss = epoch_total_loss_sum / iter_num
-        # Also ensure avg_accuracy is a scalar
-        avg_accuracy = epoch_accuracy_sum / iter_num
-        
-        # Log epoch metrics to TensorBoard
-        writer.add_scalar('Train/Loss_Epoch', avg_epoch_loss, epoch)
-        writer.add_scalar('Train/KS_Loss_Epoch', avg_ks_loss, epoch)
-        writer.add_scalar('Train/Total_Loss_Epoch', avg_total_loss, epoch)
-        writer.add_scalar('Train/Accuracy_Epoch', avg_accuracy, epoch)
-        
-        log_msg = (f"==> End of Epoch {epoch}, Avg Primary Loss: {avg_epoch_loss:.4f}, "
-                  f"Avg KS Loss: {avg_ks_loss:.4f}, Avg Total Loss: {avg_total_loss:.4f}")
-        print(log_msg)
-        logger.info(log_msg)
-        
-        
-        # Save checkpoints for model, optimizer, and optimizer_k
-        save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
-        torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
-        if optimizer_k is not None:
-            torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+        avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy = train_epoch(
+            model,
+            dataloader,
+            criterion,
+            optimizer,
+            optimizer_k,
+            device,
+            writer,
+            epoch,
+            start_epoch,
+            stage,
+            logger,
+            checkpoint_path,
+        )
             
         # =====================================================
         # ---- Validation after each epoch ----
         # =====================================================
-        model.eval()
-        val_loss_sum = 0.0
-        val_ks_sum = 0.0
-        val_total_sum = 0.0 
-        val_num = 0
-        val_accuracy_sum = 0.0
-        
-        with torch.no_grad():
-            for batch in val_dataloader:
-                val_num += 1
-                batch = data_to_cuda(batch)
-                outputs = model(batch)
-                loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-                ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-                
-                # Get scalar values
-                loss_value = loss.item()
-                ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
-                total_loss_value = loss_value + ks_loss_value
-                
-                # Compute accuracy
-                acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-                # Convert tensor to scalar value if needed
-                if isinstance(acc, torch.Tensor):
-                    if acc.numel() > 1:  # Check if tensor has multiple elements
-                        acc = acc.mean().item()  # Take the mean before converting to scalar
-                    else:
-                        acc = acc.item()
-               
-                val_accuracy_sum += acc
-                
-                # Accumulate all values
-                val_loss_sum += loss_value
-                val_ks_sum += ks_loss_value
-                val_total_sum += total_loss_value
-                
-                if val_num % 5 == 0:
-                    print(f"Validation batch {val_num} - Loss: {loss_value:.4f}, KS Loss: {ks_loss_value:.4f}, Total Loss: {total_loss_value:.4f}")
-
-        # Calculate averages
-        avg_val_loss = val_loss_sum / len(val_dataloader)
-        avg_ks_loss = val_ks_sum / len(val_dataloader)
-        avg_val_total = val_total_sum / len(val_dataloader)
-        avg_val_accuracy = val_accuracy_sum / len(val_dataloader)
-        
-        # Log validation metrics to TensorBoard
-        writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
-        writer.add_scalar('Validation/KS_Loss', avg_ks_loss, epoch)
-        writer.add_scalar('Validation/Total_Loss', avg_val_total, epoch)
-        writer.add_scalar('Validation/Accuracy', avg_val_accuracy, epoch)
-        
-        # Log validation results
-        log_msg = f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, KS Loss = {avg_ks_loss:.4f}, Total Loss = {avg_val_total:.4f}"
-        print(log_msg)
-        logger.info(log_msg)
-        
-        # Compute accuracy on the last batch of validation
-        acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-        if isinstance(acc, torch.Tensor):
-                    if acc.numel() > 1:  # Check if tensor has multiple elements
-                        acc = acc.mean().item()  # Take the mean before converting to scalar
-                    else:
-                        acc = acc.item()
-             
-        print(f"Validation Accuracy: {acc:.4f}")
+        avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy = validate_epoch(
+            model,
+            val_dataloader,
+            criterion,
+            device,
+            writer,
+            epoch,
+            logger,
+        )
     
         
         # Save best model based on validation loss and update checkpoint file
@@ -534,75 +357,14 @@ for file in config_files:
         
         # ---- Test Evaluation Periodically ----
         if epoch % 10 == 0:
-            model.eval()
-            test_loss_sum = 0.0
-            test_accuracy_sum = 0.0
-            last_batch = None
-            last_outputs = None
-            with torch.no_grad():
-                for batch_idx, batch in enumerate(test_dataloader):
-                    batch = data_to_cuda(batch)
-                    outputs = model(batch)
-                    loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-                    acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
-                    if isinstance(acc, torch.Tensor):
-                        if acc.numel() > 1:  # Check if tensor has multiple elements
-                            acc = acc.mean().item()  # Take the mean before converting to scalar
-                        else:
-                            acc = acc.item()
-               
-                    
-                    test_loss_sum += loss.item()
-                    test_accuracy_sum += acc
-                    
-                    if batch_idx == 0:  # Save the first batch for visualization
-                        last_batch = batch
-                        last_outputs = outputs
-
-            avg_test_loss = test_loss_sum / len(test_dataloader)
-            avg_test_accuracy = test_accuracy_sum / len(test_dataloader)
-            
-            # Log test metrics to TensorBoard
-            writer.add_scalar('Test/Loss', avg_test_loss, epoch)
-            writer.add_scalar('Test/Accuracy', avg_test_accuracy, epoch)
-            
-            print("Epoch {}: Test Loss = {:.4f}, Test Accuracy = {:.4f}".format(
-                epoch, avg_test_loss, avg_test_accuracy))
-
-            # --- Visualization for the last batch ---
-            if last_batch is not None and last_outputs is not None:
-                # Extract keypoints
-                if 'Ps' in last_batch:
-                    kp0 = last_batch['Ps'][0][0].cpu().numpy()
-                    kp1 = last_batch['Ps'][1][0].cpu().numpy()
-                else:
-                    kp0 = np.array([[100, 100], [150, 150], [200, 200]])
-                    kp1 = np.array([[110, 110], [160, 160], [210, 210]])
-
-                ds_mat = last_outputs["ds_mat"].cpu().numpy()[0]
-                per_mat = last_outputs["perm_mat"].cpu().numpy()[0]
-
-                matches = build_matches(ds_mat, per_mat)
-
-                # Create a visualization of matches and add to TensorBoard
-                if "id_list" in last_batch:
-                    img0 = last_batch["images"][0][0]
-                    img1 = last_batch["images"][1][0]
-                else:
-                    img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
-                    img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
-
-                img0 = to_grayscale_cv2_image(img0)
-                img1 = to_grayscale_cv2_image(img1)
-                
-                # Visualize and save match image, then add to TensorBoard
-                match_path = f"photos/test_photos/match_{epoch}.jpg"
-                visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos/", filename=f"match_{epoch}.jpg")
-
-                if os.path.exists(match_path):
-                    match_img = cv2.imread(match_path)
-                    match_img = cv2.cvtColor(match_img, cv2.COLOR_BGR2RGB)
-                    writer.add_image(f'Test/Matches', match_img.transpose(2, 0, 1), epoch, dataformats='CHW')
+            test_evaluation(
+                model,
+                test_dataloader,
+                criterion,
+                device,
+                writer,
+                epoch,
+            )
     
     # Close the TensorBoard writer at the end of this training stage
     writer.close()
