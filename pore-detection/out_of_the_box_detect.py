@@ -1,5 +1,6 @@
 import numpy, torch, argparse
-from util.utils import loadModel as lm 
+from pathlib import Path
+from util.utils import loadModel as lm
 import entireImage, cv2, torchvision, copy, multiprocessing
 from validate import readTxtList
 from util.utils import plotPredImage as draw
@@ -13,22 +14,26 @@ from torch import nn
 def nms_wrapper(args):
    return nms(*args)
 
-def nms(pred, fileIndex, validationImagesPaths): 
-    entireImage.apply_nms(pred, 0.65, 17, 0.2, "out_of_the_box_detect/Prediction/Pore/", 1+fileIndex, "out_of_the_box_detect/Prediction/Coordinates/", 17)
+def nms(pred, identifier, image_path):
+    entireImage.apply_nms(pred, 0.65, 17, 0.2,
+                          "out_of_the_box_detect/Prediction/Pore/",
+                          identifier,
+                          "out_of_the_box_detect/Prediction/Coordinates/",
+                          17)
     pred = pred.narrow(2, 16, pred[0].size(1) - 2*16).narrow(3, 16, pred[0].size(1) - 2*16)
     detections = []
-    currentImage = cv2.imread(validationImagesPaths[fileIndex], cv2.IMREAD_GRAYSCALE)
+    currentImage = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     readTxtList(
-    "out_of_the_box_detect/Prediction/Coordinates/" + "%d.txt" % (fileIndex+1), 
-    detections, 
-    currentImage.shape[0], 
-    currentImage.shape[1], 
-    17, 
+        f"out_of_the_box_detect/Prediction/Coordinates/{identifier}.txt",
+        detections,
+        currentImage.shape[0],
+        currentImage.shape[1],
+        17,
     )
 
     image = draw(currentImage, detections, 5, [0, 0, 255], 1)
 
-    cv2.imwrite("out_of_the_box_detect/Prediction/Fingerprint/%d.png" % (fileIndex+1), image)
+    cv2.imwrite(f"out_of_the_box_detect/Prediction/Fingerprint/{identifier}.png", image)
 
 
 def inference_wrapper(args): 
@@ -46,11 +51,17 @@ if __name__ == "__main__":
     multiprocessing.set_start_method("spawn")
 
 
-    parser.add_argument('--groundTruthFolder', 
+    parser.add_argument('--groundTruthFolder',
                     required=True,
-                    type=str, 
+                    type=str,
                     help="Directory where the ground truth dataset is stored"
-                    )  
+                    )
+
+    parser.add_argument('--imageExtension',
+                    default='jpg',
+                    type=str,
+                    help="Extension of the image files (e.g., jpg, bmp)"
+                    )
 
     parser.add_argument('--testingRange', 
                     default=None,
@@ -65,7 +76,7 @@ if __name__ == "__main__":
                     )    
 
     parser.add_argument('--device', 
-                    default="cuda",
+                    default="cuda:0",
                     type=str, 
                     help="Device: either cuda or cpu"
                     )    
@@ -75,8 +86,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
 
-    pathToSolution = "out_of_the_box_detect/"
-    test_range = list(args.testingRange)
+    pathToSolution = "pore-detection/out_of_the_box_detect/"
+    test_range = list(args.testingRange) if args.testingRange is not None else None
     GROUNDTRUTH = args.groundTruthFolder
 
     model = lm(modelPath=pathToSolution+f"models/{args.features}", 
@@ -97,21 +108,24 @@ if __name__ == "__main__":
     transforms = torchvision.transforms.Compose([
             torchvision.transforms.ToTensor()])
 
-    validationImagesPaths = [GROUNDTRUTH + "/PoreGroundTruthSampleimage/" + "%s.bmp" % fileIndex for fileIndex in test_range]
-    validationImages = numpy.array([cv2.imread(image, cv2.IMREAD_GRAYSCALE) for image in validationImagesPaths])
+    image_paths = sorted(Path(GROUNDTRUTH).rglob(f"*.{args.imageExtension}"))
+    if test_range is not None:
+        image_paths = [image_paths[i] for i in test_range]
 
-    predictedImages = [] #torch.zeros([len(validationImages), 1, 224, 304])
+    validationImages = numpy.array([cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) for p in image_paths])
+
+    predictedImages = []
 
     modelargs = []
-    for image in validationImages: 
+    for image in validationImages:
         modelargs.append([model, image, predictedImages, transforms, args.device])
 
     predictedImages = process_map(inference_wrapper, modelargs, max_workers=1)
 
     poolargs = []
-    poolpred, poolindex, poolpath = [], [], []
-    for fileIndex, pred in enumerate(predictedImages):
-        poolargs.append([pred, fileIndex, validationImagesPaths])
+    for img_path, pred in zip(image_paths, predictedImages):
+        identifier = f"{img_path.parent.name}_{img_path.stem}"
+        poolargs.append([pred, identifier, str(img_path)])
 
 
     process_map(nms_wrapper, poolargs, max_workers=4)

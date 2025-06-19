@@ -88,14 +88,14 @@ def findPores(
             pred = preDefinedPrediction[fileIndex-index[0]]
 
         apply_nms(
-                pred, 
-                probability, 
-                boundingBoxSize, 
-                nsmThreshold, 
-                porePredFolder, 
-                fileIndex, 
-                coordinatePredFolder, 
-                nmsWindow, 
+                pred,
+                probability,
+                boundingBoxSize,
+                nsmThreshold,
+                porePredFolder,
+                str(fileIndex),
+                coordinatePredFolder,
+                nmsWindow,
                 )
 
 
@@ -104,9 +104,9 @@ def apply_nms(
     probability, 
     boundingBoxSize, 
     nsmThreshold, 
-    porePredFolder, 
-    fileIndex, 
-    coordinatePredFolder, 
+    porePredFolder,
+    fileIdentifier,
+    coordinatePredFolder,
     nmsWindow, 
     drawPredictions = False, 
     device="cpu"
@@ -148,9 +148,9 @@ def apply_nms(
         pred = pred.squeeze()
         pred = pred.detach().numpy()
         
-        cv2.imwrite(porePredFolder + "%d.png" % fileIndex, pred*255)
+        cv2.imwrite(os.path.join(porePredFolder, f"{fileIdentifier}.png"), pred*255)
 
 
-        writeCoordinates(coordinatePredFolder + "%d.txt" % fileIndex, pred * 255, 
+        writeCoordinates(os.path.join(coordinatePredFolder, f"{fileIdentifier}.txt"), pred * 255,
         WINDOW_SIZE = nmsWindow,
         )
