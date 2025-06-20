@@ -168,7 +168,7 @@ class Net(CNN):
         ]
 
         # Binary match classifier using aggregated similarity scores
-        self.match_cls = MatchClassifier()
+        # self.match_cls = MatchClassifier()
  
     
     def forward(self, data_dict, regression=True):
@@ -398,7 +398,7 @@ class Net(CNN):
         indices.append((idx1, idx2))
 
         # Compute match probability using original similarity scores
-        match_prob = self.match_cls(s, x)
+        # match_prob = self.match_cls(s, x)
         
         # print(x)
         # print(ss_out)
@@ -409,9 +409,9 @@ class Net(CNN):
                 'perm_mat': x_list[0],
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
-                'match_prob': match_prob
+                # 'match_prob': match_prob
             })
         
-        print("Match probability:", match_prob[0].item())
+        # print("Match probability:", match_prob[0].item())
         
         return data_dict
