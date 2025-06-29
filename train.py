@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import logging
 from pathlib import Path
+import argparse
 import cv2
 import numpy as np
 import yaml
@@ -30,8 +31,13 @@ from utils.matching import build_matches
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--config', default=None, help='YAML config path')
+parser.add_argument('--verbose_nomatch', action='store_true', help='detailed no-match logging')
+args = parser.parse_args()
+
 start_epoch = float('inf')
-config_files = [ "stage1.yml", "stage2.yml","stage3.yml"]
+config_files = [args.config] if args.config else [ "stage1.yml", "stage2.yml","stage3.yml"]
 # config_files = [ "stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
@@ -299,6 +305,7 @@ for file in config_files:
             stage,
             logger,
             checkpoint_path,
+            verbose_nomatch=args.verbose_nomatch,
         )
             
         # =====================================================

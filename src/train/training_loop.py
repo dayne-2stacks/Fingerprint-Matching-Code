@@ -7,8 +7,10 @@ from src.evaluation_metric import matching_accuracy
 from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
 
+"""[2025-06-29] k=0 no-match update: training loop with optional verbose stats."""
 
-def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, writer, epoch, start_epoch, stage, logger, checkpoint_path):
+
+def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, writer, epoch, start_epoch, stage, logger, checkpoint_path, verbose_nomatch=False):
     epoch_loss_sum = 0.0
     epoch_total_loss_sum = 0.0
     running_ks_loss = 0.0
@@ -29,6 +31,22 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+            k_pred = outputs.get("k_pred", torch.zeros_like(ks_loss))
+
+            if verbose_nomatch:
+                nomask = (outputs["gt_perm_mat"].view(outputs["gt_perm_mat"].shape[0], -1).sum(dim=1) == 0)
+                num_no = int(nomask.sum().item())
+                mean_k = (k_pred[nomask].mean().item() if num_no else 0.0)
+                reasons = []
+                for idx_t in torch.nonzero(nomask).view(-1)[:3]:
+                    shared = int(outputs['gt_perm_mat'][idx_t].sum().item())
+                    if shared < 10:
+                        reasons.append("<10 shared minutiae")
+                    else:
+                        reasons.append("no overlap")
+                msg = f"no-match:{num_no} mean_k={mean_k:.3f} reasons: {'; '.join(reasons)}"
+                print(msg)
+                logger.info(msg)
 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss

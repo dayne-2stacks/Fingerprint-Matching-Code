@@ -1,3 +1,5 @@
+"""[2025-06-29] k=0 no-match update: graph matching network with ReLU head."""
+
 import logging
 from src.model.feature_extractor import ResNet18_final as CNN
 from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
@@ -6,6 +8,7 @@ from src.model.affinity_layer import InnerProductWithWeightsAffinity
 from src.model.match_classifier import MatchClassifier
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from utils.pad_tensor import pad_tensor
 from utils.factorize_graph_matching import construct_aff_mat, construct_sparse_aff_mat
 from src.model.gnn import PYGNNLayer
@@ -147,15 +150,13 @@ class Net(CNN):
         self.final_row = nn.Sequential(
             nn.Linear(self.univ_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(8, 1)
         )
 
         self.final_col = nn.Sequential(
             nn.Linear(self.univ_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(8, 1)
         )
 
         self.k_params_id += [id(item) for item in self.final_row.parameters()]
@@ -357,8 +358,8 @@ class Net(CNN):
             out_emb_col = torch.nn.functional.pad(out_emb_col, (0, 0, 0, dummy_col), value=float('-inf')).permute(0, 2, 1)
             global_row_emb = self.maxpool(out_emb_row).squeeze(-1)
             global_col_emb = self.maxpool(out_emb_col).squeeze(-1)
-            k_row = self.final_row(global_row_emb).squeeze(-1)
-            k_col = self.final_col(global_col_emb).squeeze(-1)
+            k_row = F.relu(self.final_row(global_row_emb).squeeze(-1))
+            k_col = F.relu(self.final_col(global_col_emb).squeeze(-1))
             if self.mean_k:
                 ks = (k_row + k_col) / 2
             else:
@@ -383,8 +384,11 @@ class Net(CNN):
         # print("Supervised", supervised_ks)
 
         if self.regression:
-            ks_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
-            ks_error = torch.nn.functional.l1_loss(ks * min_point_tensor, gt_ks)
+            nomatch_mask = (gt_ks == 0).float()
+            weights = 1 + 0.5 * nomatch_mask
+            mse = F.mse_loss(ks, supervised_ks, reduction='none')
+            ks_loss = (mse * weights).mean() * self.k_factor
+            ks_error = F.l1_loss(ks * min_point_tensor, gt_ks)
         else:
             ks_loss = 0.
             ks_error = 0.
@@ -407,6 +411,7 @@ class Net(CNN):
         data_dict.update({
                 'ds_mat': s_list[0],
                 'perm_mat': x_list[0],
+                'k_pred': ks.detach(),
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
                 # 'match_prob': match_prob
