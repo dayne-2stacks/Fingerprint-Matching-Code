@@ -329,13 +329,18 @@ class Net(CNN):
 
         ss = self.sinkhorn(s, n_points[idx1], n_points[idx2], dummy_row=True)
 
-        gt_ks = torch.tensor(
-            [torch.sum(data_dict['gt_perm_mat'][i]) for i in range(data_dict['gt_perm_mat'].shape[0])],
-            dtype=torch.float32, device=s.device)
+        # Calculate the minimum number of keypoints between paired images
+        min_point_list = [int(min(n_points[0][b], n_points[1][b]))
+                          for b in range(data_dict['gt_perm_mat'].shape[0])]
 
-        min_point_list = [int(min(n_points[0][b], n_points[1][b])) for b in range(data_dict['gt_perm_mat'].shape[0])]
+        min_point_tensor = torch.tensor(min_point_list, dtype=torch.float32,
+                                        device=s.device)
 
-        min_point_tensor = torch.tensor(min_point_list, dtype=torch.float32, device=s.device)
+        # Ground truth k derived from permutation matrix
+        gt_ks = torch.tensor([
+            torch.sum(data_dict['gt_perm_mat'][i])
+            for i in range(data_dict['gt_perm_mat'].shape[0])
+        ], dtype=torch.float32, device=s.device)
 
         if self.regression:
             dummy_row = self.univ_size - s.shape[1]
@@ -363,10 +368,17 @@ class Net(CNN):
                 ks = (k_row + k_col) / 2
             else:
                 ks = k_row
-            
-            
+
+
         else:
-            ks = gt_ks / min_point_tensor 
+            ks = gt_ks / min_point_tensor
+
+        # In classification mode, adjust ground truth k based on label
+        if 'label' in data_dict:
+            label_tensor = data_dict['label'].to(s.device).view(-1)
+            pred_val = ks.detach() * min_point_tensor
+            gt_ks = torch.where(label_tensor == 1, pred_val,
+                               torch.zeros_like(pred_val))
             
         if self.training:
             print("Training mode, using ground truth ks")

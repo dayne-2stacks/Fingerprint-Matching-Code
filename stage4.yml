@@ -1,0 +1,14 @@
+train:
+  start_epoch: 0
+  num_iterations: 25
+  BATCH_SIZE: 1
+  K_Optimize: true
+  K_LOSS: false
+  LR: 1.e-20
+  BACKBONE_LR: 1.e-20
+  K_LR: 1.e-6
+  LR_DECAY: 0.5
+  patience: 5
+  num_epochs: 10
+ngm:
+  REGRESSION: true

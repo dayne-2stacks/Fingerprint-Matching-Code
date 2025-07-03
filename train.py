@@ -31,7 +31,7 @@ from utils.matching import build_matches
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
-config_files = [ "stage1.yml", "stage2.yml","stage3.yml"]
+config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
 # config_files = [ "stage3.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
@@ -100,10 +100,25 @@ for file in config_files:
     )
     logger = logging.getLogger(__name__)
 
+    # -----------------------------------------------------
+    # Determine training stage from config filename
+    # -----------------------------------------------------
+    if "stage1" in file:
+        stage = 1
+    elif "stage2" in file:
+        stage = 2
+    elif "stage3" in file:
+        stage = 3
+    elif "stage4" in file:
+        stage = 4
+    else:
+        stage = None
+
     # =====================================================
     # Dataset and Dataloader
     # =====================================================
-    dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len)
+    task = 'classify' if stage == 4 else 'match'
+    dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len, task=task)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
@@ -117,19 +132,6 @@ for file in config_files:
     # model, optimizer = amp.initialize(model, optimizer)
     # =====================================================
     # Freeze / Unfreeze Layers Based on Stage
-    # =====================================================
-    # Determine the current stage based on the config file name.
-    if "stage1" in file:
-        stage = 1
-    elif "stage2" in file:
-        stage = 2
-    elif "stage3" in file:
-        stage = 3
-    else:
-        stage = None  # Default if not matching; ideally should not happen.
-
-
-
     # =====================================================
     # Set up Optimizers (with optional separate k_optimizer)
     # =====================================================
@@ -184,6 +186,16 @@ for file in config_files:
 
         optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
+    elif stage == 4:
+        print("Stage 4: Classification training, optimizing only k parameters.")
+        for name, param in model.named_parameters():
+            if id(param) not in model.k_params_id:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+        K_Optimize = True
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
     else:
         optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
