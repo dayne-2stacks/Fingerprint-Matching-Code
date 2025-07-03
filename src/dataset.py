@@ -30,9 +30,11 @@ from tqdm import tqdm
 import csv
 from pathlib import Path
 from PIL import Image
+import re
 
 class L3SFV2AugmentedDataset:
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/Synthetic', test_root=None, val_root=None, cache_path='cache'):
+    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/Synthetic',
+                 test_root=None, val_root=None, cache_path='cache', task='match'):
         """
         Initialize the dataset.
         
@@ -47,6 +49,11 @@ class L3SFV2AugmentedDataset:
         self.obj_resize = obj_resize
         self.cache_path = Path(cache_path)
         self.cache_path.mkdir(exist_ok=True, parents=True)
+        self.task = task
+
+        if self.task == 'classify':
+            self.classify_img_dir = Path('pore-detection/out-of-the-box-detect/Prediction/Pore')
+            self.classify_anno_dir = Path('pore-detection/out-of-the-box-detect/Prediction/Coordinates')
         
         # Determine the root directories based on the dataset split.
         self.root_dirs = self._get_root_dirs(sets, train_root, test_root, val_root)
@@ -58,37 +65,41 @@ class L3SFV2AugmentedDataset:
         self.process()
 
     def _get_root_dirs(self, sets, train_root, test_root, val_root):
-        """
-        Return a list of Path objects representing the directories to search for images.
-        """
+        """Return a list of Path objects for image search."""
+        if self.task == 'classify':
+            # Only one directory contains all images for classification
+            return [self.classify_img_dir]
+
         if sets == 'train':
-            # Assume training images are organized in subfolders R1–R5.
-            # return [Path(os.path.join(train_root, "R6"))]
             return [Path(os.path.join(train_root, f"R{i}")) for i in range(1, 4)]
-            return [Path(os.path.join(train_root, "R1"))]
-        
         elif sets == 'test':
             return [Path(os.path.join(train_root, "R4"))]
-            
-            return [Path(os.path.join(train_root, "R5"))]
-            if test_root is None:
-                raise ValueError("For the test set, you must provide a test_root directory.")
-            return [Path(test_root)]
         elif sets == 'val':
             return [Path(os.path.join(train_root, "R5"))]
-            
-            return [Path(os.path.join(train_root, "R5"))]
-            if val_root is None:
-                raise ValueError("For the validation set, you must provide a val_root directory.")
-            return [Path(val_root)]
         else:
             raise ValueError("sets must be one of 'train', 'test', or 'val'.")
 
     def _collect_images(self, root_dirs):
-        """
-        Walk through the provided directories and collect all JPEG image files.
-        """
+        """Collect image files according to the chosen task and split."""
         images = []
+
+        if self.task == 'classify':
+            # Filter based on R{num} contained in file name
+            if self.sets == 'train':
+                allowed = ['R1', 'R2', 'R3']
+            elif self.sets == 'test':
+                allowed = ['R4']
+            elif self.sets == 'val':
+                allowed = ['R5']
+            else:
+                raise ValueError("sets must be one of 'train', 'test', or 'val'.")
+
+            for img_file in root_dirs[0].glob('*.jpg'):
+                stem = img_file.stem
+                if any(r in stem for r in allowed):
+                    images.append(img_file)
+            return images
+
         for dir_path in root_dirs:
             if not dir_path.exists():
                 print(f"Directory {dir_path} does not exist; skipping it.")
@@ -109,7 +120,10 @@ class L3SFV2AugmentedDataset:
             - "y": y-coordinate (float)
             - "labels": auto-generated keypoint label (int) that increments
         """
-        tsv_file = img_path.parent / (img_path.stem + '.tsv')
+        if self.task == 'classify':
+            tsv_file = self.classify_anno_dir / (img_path.stem + '.txt')
+        else:
+            tsv_file = img_path.parent / (img_path.stem + '.tsv')
         keypoints = []
         if not tsv_file.exists():
             print(f"Warning: Keypoint file {tsv_file} not found for image {img_path.name}.")
@@ -117,16 +131,26 @@ class L3SFV2AugmentedDataset:
 
         try:
             with open(tsv_file, 'r') as f:
-                reader = csv.DictReader(f, delimiter='\t')
-                for i, row in enumerate(reader):
-                    try:
-                        x = float(row['x'])
-                        y = float(row['y'])
-                        # Auto-generate a label starting at 0 (or use i+1 to start at 1)
-                        keypoints.append({"labels": i, "x": x, "y": y})
-                    except Exception as e:
-                        print(f"Error reading row in {tsv_file}: {e}")
-                        continue
+                if self.task == 'classify':
+                    for i, line in enumerate(f):
+                        parts = line.strip().split()
+                        if len(parts) < 2:
+                            continue
+                        try:
+                            x, y = float(parts[0]), float(parts[1])
+                            keypoints.append({"labels": i, "x": x, "y": y})
+                        except Exception as e:
+                            print(f"Error reading line in {tsv_file}: {e}")
+                else:
+                    reader = csv.DictReader(f, delimiter='\t')
+                    for i, row in enumerate(reader):
+                        try:
+                            x = float(row['x'])
+                            y = float(row['y'])
+                            keypoints.append({"labels": i, "x": x, "y": y})
+                        except Exception as e:
+                            print(f"Error reading row in {tsv_file}: {e}")
+                            continue
         except Exception as e:
             print(f"Error opening {tsv_file}: {e}")
         
@@ -149,8 +173,12 @@ class L3SFV2AugmentedDataset:
         
         
         for img_path in tqdm(self.image_list, desc="Processing images"):
-            folder = img_path.parent.name  # e.g., R1, R2, etc.
-            file_stem = img_path.stem       # Use the entire file stem
+            if self.task == 'classify':
+                m = re.search(r'(R[1-5])', img_path.stem)
+                folder = m.group(1) if m else 'R0'
+            else:
+                folder = img_path.parent.name
+            file_stem = img_path.stem
             unique_id = f"{folder}_{file_stem}"
 
             # Retrieve keypoints from the corresponding TSV file.
@@ -208,7 +236,12 @@ class L3SFV2AugmentedDataset:
         if not img_path.exists():
             raise FileNotFoundError(f"Image file {img_path} does not exist.")
         
-        file_stem = img_path.stem  # Use the entire file stem
+        file_stem = img_path.stem
+        if self.task == 'classify':
+            m = re.search(r'(R[1-5])', img_path.stem)
+            folder = m.group(1) if m else 'R0'
+        else:
+            folder = img_path.parent.name
         subject_name = file_stem
         
         with Image.open(str(img_path)) as img:
@@ -223,7 +256,7 @@ class L3SFV2AugmentedDataset:
         
         anno_dict = {
             "path": str(img_path),
-            "cls": f"{img_path.parent.name}_{subject_name}",
+            "cls": f"{folder}_{subject_name}",
             "bounds": bounds,
             "kpts": keypoints,
             "univ_size": len(keypoints)
