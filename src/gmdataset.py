@@ -38,6 +38,8 @@ class GMDataset(Dataset):
         self.test = True if self.bm.sets == 'test' else False
         self.cls = None if cls in ['none', 'all'] else cls
 
+        self.task = getattr(self.bm, 'task', 'match')
+
         if self.cls is None:
             self.classes = self.bm.classes # This is 148
         else:
@@ -46,12 +48,17 @@ class GMDataset(Dataset):
         self.problem_type = problem
         self.img_num_list = self.bm.compute_img_num(self.classes[0])
 
-        # Updated to only get one image
-        self.id_combination, self.length = self.bm.get_id_combination(self.cls, num=1)
-        self.length_list = []
-        for cls in self.classes:
-            cls_length = self.bm.compute_length(cls)
-            self.length_list.append(cls_length)
+        if self.task == 'classify':
+            # For classification we rely on the genuine/imposter pairs
+            self.id_combination, self.length = self.bm.get_rand_id_combination()
+            self.length_list = [self.length]
+        else:
+            # Standard matching task uses pairs from the same class
+            self.id_combination, self.length = self.bm.get_id_combination(self.cls, num=1)
+            self.length_list = []
+            for cls in self.classes:
+                cls_length = self.bm.compute_length(cls)
+                self.length_list.append(cls_length)
 
 
     def __len__(self):
@@ -59,7 +66,10 @@ class GMDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.problem_type == '2GM':
-            return self.get_pair(idx, self.cls)
+            if self.task == 'classify':
+                return self.get_pair_classify(idx)
+            else:
+                return self.get_pair(idx, self.cls)
         else:
             raise NameError("Unknown problem type: {}".format(self.problem_type))
 
@@ -226,6 +236,72 @@ class GMDataset(Dataset):
         #     feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
         #     feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
         #     ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
+
+        return ret_dict
+
+    def get_pair_classify(self, idx):
+        """Return a pair of graphs for classification (genuine/imposter)."""
+        pair = self.id_combination[0][idx % self.length]
+        anno_pair, _, id_list = self.bm.get_data(list(pair))
+
+        cls = [anno['cls'] for anno in anno_pair]
+
+        # Determine label: 1 if genuine, 0 if imposter
+        fid0 = self.bm._finger_id(cls[0]) if hasattr(self.bm, '_finger_id') else cls[0]
+        fid1 = self.bm._finger_id(cls[1]) if hasattr(self.bm, '_finger_id') else cls[1]
+        label = 1 if fid0 == fid1 else 0
+
+        P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
+        P2 = [(kp['x'], kp['y']) for kp in anno_pair[1]['kpts']]
+
+        n1, n2 = len(P1), len(P2)
+
+        perm_mat = np.zeros((n1, n2), dtype=np.float32)
+        for i, kp1 in enumerate(anno_pair[0]['kpts']):
+            for j, kp2 in enumerate(anno_pair[1]['kpts']):
+                if kp1['labels'] == kp2['labels'] and kp1['labels'] != 'outlier':
+                    perm_mat[i, j] = 1
+
+        univ_size = [anno['univ_size'] for anno in anno_pair]
+
+        P1 = np.array(P1)
+        P2 = np.array(P2)
+
+        A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+        if TGT_GRAPH_CONSTRUCT == 'same':
+            G2 = perm_mat.transpose().dot(G1)
+            H2 = perm_mat.transpose().dot(H1)
+            A2 = G2.dot(H2.transpose())
+            e2 = e1
+        else:
+            A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+
+        pyg_graph1 = self.to_pyg_graph(A1, P1)
+        pyg_graph2 = self.to_pyg_graph(A2, P2)
+
+        imgs = [cv2.imread(self.bm.get_path(f"{anno['cls']}")) for anno in anno_pair]
+        if imgs[0] is not None:
+            trans = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(NORM_MEANS, NORM_STD)
+                    ])
+            imgs = [trans(img) for img in imgs]
+
+        ret_dict = {
+            'Ps': [torch.Tensor(x) for x in [P1, P2]],
+            'ns': [torch.tensor(x) for x in [n1, n2]],
+            'es': [torch.tensor(x) for x in [e1, e2]],
+            'gt_perm_mat': perm_mat,
+            'Gs': [torch.Tensor(x) for x in [G1, G2]],
+            'Hs': [torch.Tensor(x) for x in [H1, H2]],
+            'As': [torch.Tensor(x) for x in [A1, A2]],
+            'pyg_graphs': [pyg_graph1, pyg_graph2],
+            'cls': [str(x) for x in cls],
+            'id_list': id_list,
+            'univ_size': [torch.tensor(int(x)) for x in univ_size],
+            'images': imgs,
+            'label': torch.tensor(label, dtype=torch.float32)
+        }
 
         return ret_dict
 
