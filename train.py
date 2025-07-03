@@ -31,8 +31,8 @@ from utils.matching import build_matches
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
-config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
-# config_files = [ "stage3.yml"]
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
+config_files = [ "stage4.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -89,7 +89,7 @@ for file in config_files:
     # File paths
     train_root = 'dataset/Synthetic'
     OUTPUT_PATH = "results/binary-classifier"
-    PRETRAINED_PATH = "" 
+    PRETRAINED_PATH = "results/base/params/best_model.pt" 
 
     # =====================================================
     # Setup Logging
