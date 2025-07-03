@@ -13,12 +13,18 @@ import numpy as np
 from scipy.sparse import coo_matrix
 
 class L3SFV2AugmentedBenchmark(Benchmark):
-    """
-    A Benchmark subclass for our new L3SFV2Augmented dataset.
-    
+    """Benchmark wrapper for the :class:`L3SFV2AugmentedDataset`.
 
+    The class behaves like the original :class:`pygmtools.benchmark.Benchmark`
+    but adds support for two tasks: ``match`` and ``classify``.  The behaviour
+    defaults to the standard graph matching benchmark when ``task`` is
+    ``'match'``.  When ``task`` is ``'classify'`` it generates image
+    combinations following the fingerprint verification protocol described in
+    the paper.
     """
-    def __init__(self, sets, obj_resize=(512, 512), problem='2GM', filter='intersection', **args):
+
+    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+                 filter='intersection', task='match', **args):
         # Instead of a dataset name from a fixed list, we use our new dataset.
         self.name = "L3SFV2Augmented"  # our custom dataset name
         self.problem = problem
@@ -26,9 +32,17 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         self.sets = sets
         self.obj_resize = obj_resize
 
-        # Instantiate our new dataset.
-        # (The dataset __init__ is expected to generate the necessary JSON files.)
-        dataset_instance = L3SFV2AugmentedDataset(sets, obj_resize, **args)
+        # Instantiate the dataset. ``task`` controls whether we operate in
+        # matching or classification mode.
+        # (The dataset ``__init__`` is expected to generate the JSON files if
+        # they do not exist.)
+        dataset_instance = L3SFV2AugmentedDataset(
+            sets,
+            obj_resize,
+            task=task,
+            **args,
+        )
+        self.task = dataset_instance.task
 
         # Make sure that the dataset has the attributes that Benchmark expects.
         # For example, Benchmark later uses:
@@ -40,20 +54,26 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         if not hasattr(dataset_instance, "dataset_dir"):
             dataset_instance.dataset_dir = "data/L3SFV2Augmented"
         if not hasattr(dataset_instance, "suffix"):
-            dataset_instance.suffix = f"{obj_resize}"  # you can choose any suffix you like
+            dataset_instance.suffix = f"{obj_resize}"
+
+        json_file = os.path.join(
+            dataset_instance.dataset_dir,
+            f"{sets}-{dataset_instance.suffix}.json",
+        )
         if not hasattr(dataset_instance, "classes"):
-            
-            # As an example, derive the list of classes by reading the JSON file.
-            json_file = os.path.join(dataset_instance.dataset_dir, f"{sets}-{dataset_instance.suffix}.json")
+            # Derive the list of classes by reading the JSON file if the dataset
+            # did not already provide them.
             with open(json_file, "r") as f:
                 data_dict = json.load(f)
-            
+
             dataset_instance.classes = list({data_dict[k]['cls'] for k in data_dict})
             
             
     
         self.classes = dataset_instance.classes
-
+        self.dataset_dir = dataset_instance.dataset_dir
+        self.suffix = dataset_instance.suffix
+        
         # Build the paths for the unified data interface.
         self.data_path = json_file
         self.data_list_path = json_file
@@ -76,6 +96,60 @@ class L3SFV2AugmentedBenchmark(Benchmark):
     
     def get_path(self, id):
         return self.data_dict[id]["path"]
+
+    # ------------------------------------------------------------------
+    # Helper utilities for classification task
+    # ------------------------------------------------------------------
+    def _finger_id(self, cls_name: str) -> str:
+        """Return the finger identifier without the session prefix."""
+        return cls_name.split('_', 1)[1] if '_' in cls_name else cls_name
+
+    def _build_classify_pairs(self):
+        """Generate genuine and imposter pairs for the classification task."""
+        train_json = os.path.join(
+            self.dataset_dir, f"train-{self.suffix}.json"
+        )
+        with open(train_json, 'r') as f:
+            first_dict = json.load(f)
+
+        second_json = os.path.join(
+            self.dataset_dir, f"{self.sets}-{self.suffix}.json"
+        )
+        with open(second_json, 'r') as f:
+            second_dict = json.load(f)
+
+        from collections import defaultdict
+
+        first_groups = defaultdict(list)
+        for k, v in first_dict.items():
+            fid = self._finger_id(v['cls'])
+            first_groups[fid].append(k)
+
+        second_groups = defaultdict(list)
+        for k, v in second_dict.items():
+            fid = self._finger_id(v['cls'])
+            second_groups[fid].append(k)
+
+        pairs = []
+        # Genuine matches
+        for fid, s_ids in second_groups.items():
+            if fid not in first_groups:
+                continue
+            for sid in s_ids:
+                for fid1 in first_groups[fid]:
+                    pairs.append((sid, fid1))
+
+        # Imposter matches
+        for fid, s_ids in second_groups.items():
+            if not s_ids:
+                continue
+            sid = s_ids[0]
+            for other_fid, f_ids in first_groups.items():
+                if other_fid == fid or not f_ids:
+                    continue
+                pairs.append((sid, f_ids[0]))
+
+        return pairs
     
     def get_data(self, ids, test=False, shuffle=True):
         r"""
@@ -112,6 +186,11 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             if shuffle:
                 random.shuffle(obj_dict['kpts'])
             data_list.append(obj_dict)
+
+        if self.task == 'classify':
+            if not test:
+                return data_list, {}, ids
+            return data_list, ids
 
         perm_mat_dict = dict()
         id_combination = list(itertools.combinations(list(range(len(ids))), 2))
@@ -206,11 +285,16 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         :param num: int, number of images in each image ID list; for example, 2 for two-graph matching problem
         :return: length of combinations
         """
+        if self.task == 'classify':
+            if not hasattr(self, '_classify_pairs'):
+                self._classify_pairs = self._build_classify_pairs()
+            return len(self._classify_pairs)
+
         if cls == None:
             clss = None
         elif type(cls) == str:
             clss = cls
-            
+
         with open(self.data_list_path) as f1:
             data_id = json.load(f1)
 
@@ -260,6 +344,11 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             id_combination_list: Nested list of ID combinations
             length: Total number of combinations
         """
+        if self.task == 'classify':
+            if not hasattr(self, '_classify_pairs'):
+                self._classify_pairs = self._build_classify_pairs()
+            return [self._classify_pairs], len(self._classify_pairs)
+
         from collections import defaultdict
         length = 0
         id_combination_list = []
@@ -272,7 +361,6 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             return [], 0
 
         available_ids = [id for id in data_id if id in self.data_dict]
-        print(f"Available IDs: {len(available_ids)}")
         
         # Group IDs by class
         class_to_ids = defaultdict(list)
@@ -281,7 +369,6 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             class_to_ids[cls].append(id)
         
         classes = list(class_to_ids.keys())
-        print(f"Found {len(classes)} classes")
         
         # Create cross-class combinations
         for base_cls in classes:
@@ -317,29 +404,6 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             if class_combinations:
                 id_combination_list.append(class_combinations)
                 length += len(class_combinations)
-                print(f"Base class {base_cls}: Added {len(class_combinations)} combinations")
         
-        print(f"Total combinations: {length}")
         return id_combination_list, length
-# ------------------------------------------------------------------------------
-# Example usage:
-if __name__ == "__main__":
-    # Suppose your training images (and corresponding TSV annotation files)
-    # are under '/green/data/L3SF_V2/L3SF_V2_Augmented'
-    benchmark_instance = L3SFV2AugmentedBenchmark(
-        sets='train',
-        obj_resize=(320, 240),
-        train_root='/green/data/L3SF_V2/L3SF_V2_Augmented'
-    )
-
-    # Now you can use benchmark_instance.get_data, benchmark_instance.rand_get_data,
-    # or any other methods defined in Benchmark. Since you are not interested in evaluation,
-    # you can simply ignore eval/eval_cls.
-    # print("Dataset classes:", benchmark_instance.classes)
-    with Image.open(str("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/1_left_loop_aug_0.jpg")) as img:
-        print(img.size)
-    print("Data path:", benchmark_instance.obj_resize)
-    data_dict, perm, ids = benchmark_instance.get_data(["R1_8_right_loop_aug_0", "R1_8_right_loop_aug_1"])
-    print(data_dict[1]["univ_size"])
-    print(perm)
     
