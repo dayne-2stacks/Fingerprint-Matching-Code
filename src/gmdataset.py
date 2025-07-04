@@ -46,8 +46,12 @@ class GMDataset(Dataset):
             self.classes = [self.cls]
 
         self.problem_type = problem
-        self.img_num_list = self.bm.compute_img_num(self.classes[0])
-
+        print(f"Classes: {self.classes}")
+        print(f"Benchmark type: {type(self.bm)}")
+        if len(self.classes) > 0:
+            self.img_num_list = self.bm.compute_img_num(self.classes[0])
+        else:
+            print("Error: self.classes is empty!")
         if self.task == 'classify':
             # For classification we rely on the genuine/imposter pairs
             self.id_combination, self.length = self.bm.get_rand_id_combination()

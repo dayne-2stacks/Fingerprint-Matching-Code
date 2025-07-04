@@ -52,8 +52,8 @@ class L3SFV2AugmentedDataset:
         self.task = task
 
         if self.task == 'classify':
-            self.classify_img_dir = Path('pore-detection/out-of-the-box-detect/Prediction/Pore')
-            self.classify_anno_dir = Path('pore-detection/out-of-the-box-detect/Prediction/Coordinates')
+            self.classify_img_dir = Path('pore-detection/out_of_the_box_detect/Prediction/Pore')
+            self.classify_anno_dir = Path('pore-detection/out_of_the_box_detect/Prediction/Coordinates')
         
         # Determine the root directories based on the dataset split.
         self.root_dirs = self._get_root_dirs(sets, train_root, test_root, val_root)
@@ -94,7 +94,7 @@ class L3SFV2AugmentedDataset:
             else:
                 raise ValueError("sets must be one of 'train', 'test', or 'val'.")
 
-            for img_file in root_dirs[0].glob('*.jpg'):
+            for img_file in root_dirs[0].glob('*.png'):
                 stem = img_file.stem
                 if any(r in stem for r in allowed):
                     images.append(img_file)
@@ -133,7 +133,8 @@ class L3SFV2AugmentedDataset:
             with open(tsv_file, 'r') as f:
                 if self.task == 'classify':
                     for i, line in enumerate(f):
-                        parts = line.strip().split()
+                        cleaned = line.replace(',', ' ')
+                        parts = cleaned.split()
                         if len(parts) < 2:
                             continue
                         try:

@@ -29,7 +29,6 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         self.name = "L3SFV2Augmented"  # our custom dataset name
         self.problem = problem
         self.filter = filter
-        self.sets = sets
         self.obj_resize = obj_resize
 
         # Instantiate the dataset. ``task`` controls whether we operate in
@@ -42,7 +41,10 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             task=task,
             **args,
         )
+        
         self.task = dataset_instance.task
+        self.sets = 'test' if self.task == 'classify' else sets 
+            
 
         # Make sure that the dataset has the attributes that Benchmark expects.
         # For example, Benchmark later uses:
