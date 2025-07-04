@@ -112,7 +112,9 @@ class GMDataset(Dataset):
         # Get one of the images (There will only be one since using original dataset)
         # Load original image and annotations
         
-        original_img = cv2.imread(self.bm.get_path(f"{anno_pair[0]['cls']}"))
+        # ``id_list`` contains the image IDs returned from ``Benchmark.get_data``
+        # Use those IDs to load the original image instead of the class label
+        original_img = cv2.imread(self.bm.get_path(id_list[0]))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
         n_common = 0
@@ -283,7 +285,8 @@ class GMDataset(Dataset):
         pyg_graph1 = self.to_pyg_graph(A1, P1)
         pyg_graph2 = self.to_pyg_graph(A2, P2)
 
-        imgs = [cv2.imread(self.bm.get_path(f"{anno['cls']}")) for anno in anno_pair]
+        # Use the IDs returned by ``Benchmark.get_data`` to retrieve the image paths.
+        imgs = [cv2.imread(self.bm.get_path(img_id)) for img_id in id_list]
         if imgs[0] is not None:
             trans = transforms.Compose([
                     transforms.ToTensor(),
@@ -419,7 +422,8 @@ class TestDataset(Dataset):
         
         
 
-        imgs = [cv2.imread(self.bm.get_path(f"{anno['cls']}")) for anno in anno_pair]
+        # Retrieve the image paths using ``id_list`` instead of the class labels.
+        imgs = [cv2.imread(self.bm.get_path(img_id)) for img_id in id_list]
         if imgs[0] is not None:
             trans = transforms.Compose([
                     transforms.ToTensor(),
