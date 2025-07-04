@@ -248,7 +248,11 @@ class GMDataset(Dataset):
     def get_pair_classify(self, idx):
         """Return a pair of graphs for classification (genuine/imposter)."""
         pair = self.id_combination[0][idx % self.length]
-        anno_pair, _, id_list = self.bm.get_data(list(pair))
+        result = self.bm.get_data(list(pair))
+        if len(result) == 3:
+            anno_pair, _, id_list = result
+        else:
+            anno_pair, id_list = result
 
         cls = [anno['cls'] for anno in anno_pair]
 

@@ -299,7 +299,17 @@ class Net(CNN):
             # NGM qap solver
                 tmp_emb = emb[b].unsqueeze(0)
                 # if self.geometric:
-                adj = SparseTensor(row=row_idx.long(), col=col_idx.long(), value=K_value,
+                # Ensure index/value tensors have the same length when constructing
+                # the sparse affinity matrix. Occasionally the returned row/col
+                # indices may not perfectly match the value tensor due to
+                # preprocessing irregularities.  To prevent runtime errors in
+                # ``torch_sparse`` we truncate all tensors to the smallest common
+                # length.
+                common_len = min(row_idx.numel(), col_idx.numel(), K_value.numel())
+                row = row_idx[:common_len].long()
+                col = col_idx[:common_len].long()
+                val = K_value[:common_len]
+                adj = SparseTensor(row=row, col=col, value=val,
                                     sparse_sizes=(Kp.shape[1] * Kp.shape[2], Kp.shape[1] * Kp.shape[2]))
                 for i in range(self.gnn_layer):
                     gnn_layer = getattr(self, 'gnn_layer_{}'.format(i))
