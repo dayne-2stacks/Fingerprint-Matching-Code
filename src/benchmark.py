@@ -43,7 +43,10 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         )
         
         self.task = dataset_instance.task
-        self.sets = 'test' if self.task == 'classify' else sets 
+        # When operating in classification mode, keep the split passed by the
+        # caller rather than forcing the benchmark to "test".  This ensures the
+        # benchmark only references IDs that belong to the selected split.
+        self.sets = sets
             
 
         # Make sure that the dataset has the attributes that Benchmark expects.
@@ -84,8 +87,13 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         # Load the data dictionary from the JSON file.
         with open(self.data_path, "r") as f:
             self.data_dict = json.load(f)
+
+        # ``data_dict`` now contains only the annotations from the selected
+        # split.  When generating classification pairs we will ensure the IDs
+        # come from this dictionary so there is no need to merge data from other
+        # splits.
             
-        if self.sets == 'test':
+        if self.sets == 'test' or self.task == 'classify':
             tmpfile = tempfile.gettempdir()
             pid_num = os.getpid()
             cache_dir = str(pid_num) + '_gt_cache'
@@ -108,48 +116,38 @@ class L3SFV2AugmentedBenchmark(Benchmark):
 
     def _build_classify_pairs(self):
         """Generate genuine and imposter pairs for the classification task."""
-        train_json = os.path.join(
-            self.dataset_dir, f"train-{self.suffix}.json"
-        )
-        with open(train_json, 'r') as f:
-            first_dict = json.load(f)
-
-        second_json = os.path.join(
+        json_path = os.path.join(
             self.dataset_dir, f"{self.sets}-{self.suffix}.json"
         )
-        with open(second_json, 'r') as f:
-            second_dict = json.load(f)
+        with open(json_path, 'r') as f:
+            data_dict = json.load(f)
 
         from collections import defaultdict
 
-        first_groups = defaultdict(list)
-        for k, v in first_dict.items():
+        groups = defaultdict(list)
+        for k, v in data_dict.items():
             fid = self._finger_id(v['cls'])
-            first_groups[fid].append(k)
-
-        second_groups = defaultdict(list)
-        for k, v in second_dict.items():
-            fid = self._finger_id(v['cls'])
-            second_groups[fid].append(k)
+            groups[fid].append(k)
 
         pairs = []
-        # Genuine matches
-        for fid, s_ids in second_groups.items():
-            if fid not in first_groups:
-                continue
-            for sid in s_ids:
-                for fid1 in first_groups[fid]:
-                    pairs.append((sid, fid1))
 
-        # Imposter matches
-        for fid, s_ids in second_groups.items():
-            if not s_ids:
+        # Genuine matches: all unique pairs of images from the same finger
+        for fid, id_list in groups.items():
+            if len(id_list) < 2:
                 continue
-            sid = s_ids[0]
-            for other_fid, f_ids in first_groups.items():
-                if other_fid == fid or not f_ids:
+            pairs.extend(itertools.combinations(id_list, 2))
+
+        # Imposter matches: one representative from each finger paired with the
+        # representative of every other finger
+        fids = list(groups.keys())
+        for i, fid in enumerate(fids):
+            if not groups[fid]:
+                continue
+            base = groups[fid][0]
+            for j, other_fid in enumerate(fids):
+                if other_fid == fid or not groups[other_fid]:
                     continue
-                pairs.append((sid, f_ids[0]))
+                pairs.append((base, groups[other_fid][0]))
 
         return pairs
     
@@ -190,8 +188,8 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             data_list.append(obj_dict)
 
         if self.task == 'classify':
-            if not test:
-                return data_list, {}, ids
+            # if not test:
+            #     return data_list, {}, ids
             return data_list, ids
 
         perm_mat_dict = dict()
@@ -265,7 +263,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
                     id_tuple = (p, k + p + 1)
                     perm_mat_dict[id_tuple] = coo_matrix(perm_mat_list[k])
 
-        if self.sets == 'test':
+        if self.sets == 'test' or self.task == 'classify':
             for pair in id_combination:
                 id_pair = (ids[pair[0]], ids[pair[1]])
                 gt = perm_mat_dict[pair].toarray()
@@ -274,7 +272,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
                 if not os.path.exists(gt_path):
                     np.save(gt_path, perm_mat_dict[pair])
 
-        if not test:
+        if not test or self.task == 'classify':
             return data_list, perm_mat_dict, ids
         else:
             return data_list, ids
