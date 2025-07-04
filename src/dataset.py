@@ -177,10 +177,19 @@ class L3SFV2AugmentedDataset:
             if self.task == 'classify':
                 m = re.search(r'(R[1-5])', img_path.stem)
                 folder = m.group(1) if m else 'R0'
+                file_stem = img_path.stem
+                # Images used for classification already include the session
+                # prefix (e.g. ``R4_166_1_2``). Avoid adding the folder again to
+                # keep the identifier consistent with the expected naming
+                # convention.
+                unique_id = file_stem
+                finger = file_stem.split('_')[1] if '_' in file_stem else file_stem
+                cls_name = f"{folder}_{finger}"
             else:
                 folder = img_path.parent.name
-            file_stem = img_path.stem
-            unique_id = f"{folder}_{file_stem}"
+                file_stem = img_path.stem
+                unique_id = f"{folder}_{file_stem}"
+                cls_name = unique_id
 
             # Retrieve keypoints from the corresponding TSV file.
             kpts = self._get_keypoints(img_path)
@@ -195,7 +204,7 @@ class L3SFV2AugmentedDataset:
             # Build the annotation dictionary.
             anno = {
                 "path": str(img_path),
-                "cls": f"{unique_id}",
+                "cls": cls_name,
                 "bounds": fixed_bounds,
                 "kpts": kpts,
                 "univ_size": len(kpts)
@@ -241,8 +250,16 @@ class L3SFV2AugmentedDataset:
         if self.task == 'classify':
             m = re.search(r'(R[1-5])', img_path.stem)
             folder = m.group(1) if m else 'R0'
+            # For classification images the stem already contains the session
+            # prefix, so use it directly as identifier and compute the class
+            # name from the finger ID.
+            unique_id = file_stem
+            finger = file_stem.split('_')[1] if '_' in file_stem else file_stem
+            cls_name = f"{folder}_{finger}"
         else:
             folder = img_path.parent.name
+            unique_id = f"{folder}_{file_stem}"
+            cls_name = unique_id
         subject_name = file_stem
         
         with Image.open(str(img_path)) as img:
@@ -257,7 +274,7 @@ class L3SFV2AugmentedDataset:
         
         anno_dict = {
             "path": str(img_path),
-            "cls": f"{folder}_{subject_name}",
+            "cls": cls_name,
             "bounds": bounds,
             "kpts": keypoints,
             "univ_size": len(keypoints)
