@@ -131,11 +131,10 @@ class L3SFV2AugmentedBenchmark(Benchmark):
 
         pairs = []
 
-        # Genuine matches: all unique pairs of images from the same finger
-        for fid, id_list in groups.items():
-            if len(id_list) < 2:
-                continue
-            pairs.extend(itertools.combinations(id_list, 2))
+        # Genuine matches: pair each image with itself so two augmented copies
+        for id_list in groups.values():
+            for img_id in id_list:
+                pairs.append((img_id, img_id))
 
         # Imposter matches: one representative from each finger paired with the
         # representative of every other finger

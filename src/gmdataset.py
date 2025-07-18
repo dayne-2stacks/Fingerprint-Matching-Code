@@ -261,36 +261,62 @@ class GMDataset(Dataset):
         fid1 = self.bm._finger_id(cls[1]) if hasattr(self.bm, '_finger_id') else cls[1]
         label = 1 if fid0 == fid1 else 0
 
-        P1 = [(kp['x'], kp['y']) for kp in anno_pair[0]['kpts']]
-        P2 = [(kp['x'], kp['y']) for kp in anno_pair[1]['kpts']]
+        if label == 1:
+            # Augment the same image twice
+            img_path = self.bm.get_path(pair[0])
+            original_img = cv2.imread(img_path)
+            original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+
+            n_common = 0
+            while n_common <= 3:
+                img1, annos1 = augment_image(original_img, original_annos)
+                img2, annos2 = augment_image(original_img, original_annos)
+
+                labels1 = set(a[0] for a in annos1)
+                labels2 = set(a[0] for a in annos2)
+                common_labels = labels1.intersection(labels2)
+                n_common = len(common_labels)
+
+            annos1_filtered = [a for a in annos1 if a[0] in common_labels]
+            annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+
+            perm_mat = np.eye(n_common, dtype=np.float32)
+        else:
+            # Imposter pair: augment two different images and use zero perm matrix
+            img_path1 = self.bm.get_path(pair[0])
+            img_path2 = self.bm.get_path(pair[1])
+            img1_orig = cv2.imread(img_path1)
+            img2_orig = cv2.imread(img_path2)
+            annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+            annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
+
+            img1, annos1_filtered = augment_image(img1_orig, annos1_base)
+            img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+
+            perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
+            n_common = 0
+
+        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
+        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
 
         n1, n2 = len(P1), len(P2)
 
-        perm_mat = np.zeros((n1, n2), dtype=np.float32)
-        for i, kp1 in enumerate(anno_pair[0]['kpts']):
-            for j, kp2 in enumerate(anno_pair[1]['kpts']):
-                if kp1['labels'] == kp2['labels'] and kp1['labels'] != 'outlier':
-                    perm_mat[i, j] = 1
-
-        univ_size = [anno['univ_size'] for anno in anno_pair]
-
-        P1 = np.array(P1)
-        P2 = np.array(P2)
-
         A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
-            G2 = perm_mat.transpose().dot(G1)
-            H2 = perm_mat.transpose().dot(H1)
-            A2 = G2.dot(H2.transpose())
-            e2 = e1
+            if perm_mat.size == 0:
+                A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+            else:
+                G2 = perm_mat.transpose().dot(G1)
+                H2 = perm_mat.transpose().dot(H1)
+                A2 = G2.dot(H2.transpose())
+                e2 = e1
         else:
             A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
 
         pyg_graph1 = self.to_pyg_graph(A1, P1)
         pyg_graph2 = self.to_pyg_graph(A2, P2)
 
-        # Use the IDs returned by ``Benchmark.get_data`` to retrieve the image paths.
-        imgs = [cv2.imread(self.bm.get_path(img_id)) for img_id in id_list]
+        imgs = [img1, img2]
         if imgs[0] is not None:
             trans = transforms.Compose([
                     transforms.ToTensor(),
@@ -309,7 +335,7 @@ class GMDataset(Dataset):
             'pyg_graphs': [pyg_graph1, pyg_graph2],
             'cls': [str(x) for x in cls],
             'id_list': id_list,
-            'univ_size': [torch.tensor(int(x)) for x in univ_size],
+            'univ_size': torch.tensor(n_common),
             'images': imgs,
             'label': torch.tensor(label, dtype=torch.float32)
         }

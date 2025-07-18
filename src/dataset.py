@@ -50,10 +50,6 @@ class L3SFV2AugmentedDataset:
         self.cache_path = Path(cache_path)
         self.cache_path.mkdir(exist_ok=True, parents=True)
         self.task = task
-
-        if self.task == 'classify':
-            self.classify_img_dir = Path('pore-detection/out_of_the_box_detect/Prediction/Pore')
-            self.classify_anno_dir = Path('pore-detection/out_of_the_box_detect/Prediction/Coordinates')
         
         # Determine the root directories based on the dataset split.
         self.root_dirs = self._get_root_dirs(sets, train_root, test_root, val_root)
@@ -66,10 +62,6 @@ class L3SFV2AugmentedDataset:
 
     def _get_root_dirs(self, sets, train_root, test_root, val_root):
         """Return a list of Path objects for image search."""
-        if self.task == 'classify':
-            # Only one directory contains all images for classification
-            return [self.classify_img_dir]
-
         if sets == 'train':
             return [Path(os.path.join(train_root, f"R{i}")) for i in range(1, 4)]
         elif sets == 'test':
@@ -82,23 +74,6 @@ class L3SFV2AugmentedDataset:
     def _collect_images(self, root_dirs):
         """Collect image files according to the chosen task and split."""
         images = []
-
-        if self.task == 'classify':
-            # Filter based on R{num} contained in file name
-            if self.sets == 'train':
-                allowed = ['R1', 'R2', 'R3']
-            elif self.sets == 'test':
-                allowed = ['R4']
-            elif self.sets == 'val':
-                allowed = ['R5']
-            else:
-                raise ValueError("sets must be one of 'train', 'test', or 'val'.")
-
-            for img_file in root_dirs[0].glob('*.png'):
-                stem = img_file.stem
-                if any(r in stem for r in allowed):
-                    images.append(img_file)
-            return images
 
         for dir_path in root_dirs:
             if not dir_path.exists():
@@ -118,12 +93,10 @@ class L3SFV2AugmentedDataset:
             A list of dictionaries, each containing:
             - "x": x-coordinate (float)
             - "y": y-coordinate (float)
-            - "labels": auto-generated keypoint label (int) that increments
+            - "labels": unique keypoint label constructed as
+              ``{folder}_{file_stem}_{index}``
         """
-        if self.task == 'classify':
-            tsv_file = self.classify_anno_dir / (img_path.stem + '.txt')
-        else:
-            tsv_file = img_path.parent / (img_path.stem + '.tsv')
+        tsv_file = img_path.parent / (img_path.stem + '.tsv')
         keypoints = []
         if not tsv_file.exists():
             print(f"Warning: Keypoint file {tsv_file} not found for image {img_path.name}.")
@@ -131,27 +104,17 @@ class L3SFV2AugmentedDataset:
 
         try:
             with open(tsv_file, 'r') as f:
-                if self.task == 'classify':
-                    for i, line in enumerate(f):
-                        cleaned = line.replace(',', ' ')
-                        parts = cleaned.split()
-                        if len(parts) < 2:
-                            continue
-                        try:
-                            x, y = float(parts[0]), float(parts[1])
-                            keypoints.append({"labels": i, "x": x, "y": y})
-                        except Exception as e:
-                            print(f"Error reading line in {tsv_file}: {e}")
-                else:
-                    reader = csv.DictReader(f, delimiter='\t')
-                    for i, row in enumerate(reader):
-                        try:
-                            x = float(row['x'])
-                            y = float(row['y'])
-                            keypoints.append({"labels": i, "x": x, "y": y})
-                        except Exception as e:
-                            print(f"Error reading row in {tsv_file}: {e}")
-                            continue
+                reader = csv.DictReader(f, delimiter='\t')
+                prefix = f"{img_path.parent.name}_{img_path.stem}"
+                for i, row in enumerate(reader):
+                    try:
+                        x = float(row['x'])
+                        y = float(row['y'])
+                        label = f"{prefix}_{i}"
+                        keypoints.append({"labels": label, "x": x, "y": y})
+                    except Exception as e:
+                        print(f"Error reading row in {tsv_file}: {e}")
+                        continue
         except Exception as e:
             print(f"Error opening {tsv_file}: {e}")
         
@@ -174,22 +137,10 @@ class L3SFV2AugmentedDataset:
         
         
         for img_path in tqdm(self.image_list, desc="Processing images"):
-            if self.task == 'classify':
-                m = re.search(r'(R[1-5])', img_path.stem)
-                folder = m.group(1) if m else 'R0'
-                file_stem = img_path.stem
-                # Images used for classification already include the session
-                # prefix (e.g. ``R4_166_1_2``). Avoid adding the folder again to
-                # keep the identifier consistent with the expected naming
-                # convention.
-                unique_id = file_stem
-                finger = file_stem.split('_')[1] if '_' in file_stem else file_stem
-                cls_name = f"{folder}_{finger}"
-            else:
-                folder = img_path.parent.name
-                file_stem = img_path.stem
-                unique_id = f"{folder}_{file_stem}"
-                cls_name = unique_id
+            folder = img_path.parent.name
+            file_stem = img_path.stem
+            unique_id = f"{folder}_{file_stem}"
+            cls_name = unique_id
 
             # Retrieve keypoints from the corresponding TSV file.
             kpts = self._get_keypoints(img_path)
@@ -197,8 +148,8 @@ class L3SFV2AugmentedDataset:
             with Image.open(str(img_path)) as img:
                 width, height = img.size
             
-            xmax = max(340, width)
-            ymax = max(240, height)
+            xmax = min(320, width)
+            ymax = min(240, height)
             fixed_bounds = [0, 0, xmax, ymax]
             
             # Build the annotation dictionary.
@@ -232,7 +183,7 @@ class L3SFV2AugmentedDataset:
         Assumes that for an image file there is a corresponding TSV file
         (with headers "x" and "y") in the same directory.
         
-        The bounding box is computed as [0, 0, min(340, width), min(240, height)],
+        The bounding box is computed as [0, 0, min(320, width), min(240, height)],
         ensuring that it does not exceed the original image size.
         
         Returns:
@@ -247,19 +198,9 @@ class L3SFV2AugmentedDataset:
             raise FileNotFoundError(f"Image file {img_path} does not exist.")
         
         file_stem = img_path.stem
-        if self.task == 'classify':
-            m = re.search(r'(R[1-5])', img_path.stem)
-            folder = m.group(1) if m else 'R0'
-            # For classification images the stem already contains the session
-            # prefix, so use it directly as identifier and compute the class
-            # name from the finger ID.
-            unique_id = file_stem
-            finger = file_stem.split('_')[1] if '_' in file_stem else file_stem
-            cls_name = f"{folder}_{finger}"
-        else:
-            folder = img_path.parent.name
-            unique_id = f"{folder}_{file_stem}"
-            cls_name = unique_id
+        folder = img_path.parent.name
+        unique_id = f"{folder}_{file_stem}"
+        cls_name = unique_id
         subject_name = file_stem
         
         with Image.open(str(img_path)) as img:
