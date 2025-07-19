@@ -14,10 +14,10 @@ The classification task reuses the same dataset structure. Genuine pairs are cre
 ## Evaluating the Binary Classifier
 
 Use `evaluate_binary_classifier.py` to compute verification metrics for the
-binary classification model. The matching backbone remains frozen during
-classification training, so its weights are loaded from
-`results/base/params/best_model.pt`.  The classifier head itself is loaded from
-`results/binary-classifier/params/best_model.pt`.
+binary classification model. The script loads the trained network from
+`results/binary-classifier/params/best_model.pt` and determines whether two
+fingerprints match based on the predicted `k` value: if `k` equals zero the pair
+is classified as an imposter.
 
 The evaluation writes `metrics.csv`, an `eval.log` file with the values,
 and ROC/PR curve images to the `results/binary-classifier` directory.

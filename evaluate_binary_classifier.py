@@ -27,7 +27,6 @@ import torch
 from src.benchmark import L3SFV2AugmentedBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 from src.model.ngm import Net
-from src.model.match_classifier import MatchClassifier
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import load_model
 
@@ -50,23 +49,17 @@ def evaluate():
     dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
     dataloader = get_dataloader(dataset, shuffle=False, fix_seed=True)
 
-    match_net = Net(regression=False)
-    classifier = MatchClassifier()
+    match_net = Net(regression=True)
 
-    # The classifier training only updates the small classification head.
-    # The matching backbone remains identical to the base model, so we
-    # reuse the pre-trained backbone weights from ``results/base``.
-    match_path = Path("results/base/params/best_model.pt")
-    cls_path = Path("results/binary-classifier/params/best_model.pt")
+    # Load the best weights of the classifier model. The predicted k
+    # value from the network determines whether two fingerprints match.
+    model_path = Path("results/binary-classifier/params/best_model.pt")
 
-    if match_path.exists():
-        load_model(match_net, str(match_path))
-    if cls_path.exists():
-        load_model(classifier, str(cls_path))
+    if model_path.exists():
+        load_model(match_net, str(model_path))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     match_net.to(device).eval()
-    classifier.to(device).eval()
 
     all_labels = []
     all_probs = []
@@ -74,9 +67,13 @@ def evaluate():
     with torch.no_grad():
         for batch in dataloader:
             batch = data_to_cuda(batch)
-            outputs = match_net(batch, regression=False)
-            probs = classifier(outputs["ds_mat"], outputs["perm_mat"]).squeeze(1)
-            all_probs.append(probs.cpu())
+            outputs = match_net(batch)
+            perm_mat = outputs["perm_mat"].detach()
+            k_pred = perm_mat.sum(dim=(1, 2)).float()
+            ns = batch["ns"]
+            min_points = torch.min(ns[0], ns[1]).float()
+            prob = (k_pred / min_points).clamp(0, 1)
+            all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
 
     all_probs = torch.cat(all_probs).numpy()
