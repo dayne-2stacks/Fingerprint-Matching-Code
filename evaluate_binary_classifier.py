@@ -8,6 +8,7 @@ files in the same directory.
 """
 
 from pathlib import Path
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -32,7 +33,11 @@ from utils.models_sl import load_model
 
 
 def evaluate():
-    """Run evaluation using the best classifier model."""
+    """Run evaluation using the best classifier model.
+
+    Metrics are written to ``metrics.csv`` and also logged to ``eval.log``
+    inside ``results/binary-classifier``.
+    """
     dataset_len = 640
     data_root = "dataset/Synthetic"
 
@@ -48,6 +53,9 @@ def evaluate():
     match_net = Net(regression=False)
     classifier = MatchClassifier()
 
+    # The classifier training only updates the small classification head.
+    # The matching backbone remains identical to the base model, so we
+    # reuse the pre-trained backbone weights from ``results/base``.
     match_path = Path("results/base/params/best_model.pt")
     cls_path = Path("results/binary-classifier/params/best_model.pt")
 
@@ -94,6 +102,13 @@ def evaluate():
     out_dir = Path("results/binary-classifier")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    logging.basicConfig(
+        filename=str(out_dir / "eval.log"),
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger(__name__)
+
     # ROC curve
     plt.figure()
     plt.plot(fpr, tpr, label=f"ROC AUC = {roc_auc:.4f}")
@@ -131,6 +146,7 @@ def evaluate():
     print("Evaluation metrics:")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
+        logger.info("%s: %.4f", k, v)
 
 
 if __name__ == "__main__":
