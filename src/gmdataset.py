@@ -54,7 +54,17 @@ class GMDataset(Dataset):
             print("Error: self.classes is empty!")
         if self.task == 'classify':
             # For classification we rely on the genuine/imposter pairs
-            self.id_combination, self.length = self.bm.get_rand_id_combination()
+            pairs, total_len = self.bm.get_rand_id_combination()
+            # ``length`` may request a subset of the available pairs. This
+            # allows stage 4 to train on a smaller sample of genuine and
+            # imposter matches.
+            if length is not None and length < total_len:
+                random.shuffle(pairs[0])
+                pairs[0] = pairs[0][:length]
+                self.length = length
+            else:
+                self.length = total_len
+            self.id_combination = pairs
             self.length_list = [self.length]
         else:
             # Standard matching task uses pairs from the same class
@@ -303,8 +313,8 @@ class GMDataset(Dataset):
 
         A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
-            if perm_mat.size == 0:
-                A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
+            if perm_mat.sum() == 0:
+                A2, G2, H2, e2 = build_graphs(P2, n2, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
             else:
                 G2 = perm_mat.transpose().dot(G1)
                 H2 = perm_mat.transpose().dot(H1)
