@@ -129,12 +129,13 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             fid = self._finger_id(v['cls'])
             groups[fid].append(k)
 
-        pairs = []
+        genuine_pairs = []
+        imposter_pairs = []
 
         # Genuine matches: pair each image with itself so two augmented copies
         for id_list in groups.values():
             for img_id in id_list:
-                pairs.append((img_id, img_id))
+                genuine_pairs.append((img_id, img_id))
 
         # Imposter matches: one representative from each finger paired with the
         # representative of every other finger
@@ -146,7 +147,14 @@ class L3SFV2AugmentedBenchmark(Benchmark):
             for j, other_fid in enumerate(fids):
                 if other_fid == fid or not groups[other_fid]:
                     continue
-                pairs.append((base, groups[other_fid][0]))
+                imposter_pairs.append((base, groups[other_fid][0]))
+
+        # Balance the number of pairs so we have equal genuine and imposter
+        pair_count = min(len(genuine_pairs), len(imposter_pairs))
+        random.shuffle(genuine_pairs)
+        random.shuffle(imposter_pairs)
+        pairs = genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
+        random.shuffle(pairs)
 
         return pairs
     
