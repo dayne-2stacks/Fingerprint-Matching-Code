@@ -31,8 +31,8 @@ from utils.matching import build_matches
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
-# config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
-config_files = [ "stage4.yml"]
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
+config_files = [ "stage5.yml" ]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -111,6 +111,8 @@ for file in config_files:
         stage = 3
     elif "stage4" in file:
         stage = 4
+    elif "stage5" in file:
+        stage = 5
     else:
         stage = None
 
@@ -196,6 +198,13 @@ for file in config_files:
         K_Optimize = True
         optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
+    elif stage == 5:
+        print("Stage 5: Joint training of matching and k modules.")
+        for name, param in model.named_parameters():
+            param.requires_grad = True
+        K_Optimize = True
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     else:
         optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
