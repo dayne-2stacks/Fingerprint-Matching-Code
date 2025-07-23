@@ -3,7 +3,6 @@ from src.model.feature_extractor import ResNet18_final as CNN
 from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
 from utils.feature_align import feature_align
 from src.model.affinity_layer import InnerProductWithWeightsAffinity
-from src.model.match_classifier import MatchClassifier
 import torch
 import torch.nn as nn
 from utils.pad_tensor import pad_tensor
