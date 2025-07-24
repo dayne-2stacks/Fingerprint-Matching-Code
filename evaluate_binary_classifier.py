@@ -78,14 +78,17 @@ def evaluate():
     all_probs = torch.cat(all_probs).numpy()
     all_labels = torch.cat(all_labels).numpy()
 
-    preds = (all_probs >= 0.5).astype(np.int32)
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    fnr = 1 - tpr
+    eer_idx = np.nanargmin(np.abs(fnr - fpr))
+    eer_threshold = thresholds[eer_idx]
+    preds = (all_probs >= eer_threshold).astype(np.int32)
 
     accuracy = accuracy_score(all_labels, preds)
     precision = precision_score(all_labels, preds)
     recall = recall_score(all_labels, preds)
     f1 = f1_score(all_labels, preds)
 
-    fpr, tpr, _ = roc_curve(all_labels, all_probs)
     roc_auc = auc(fpr, tpr)
 
     prec_curve, rec_curve, _ = precision_recall_curve(all_labels, all_probs)

@@ -12,6 +12,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
     epoch_loss_sum = 0.0
     epoch_total_loss_sum = 0.0
     running_ks_loss = 0.0
+    running_cls_loss = 0.0
     running_ks_error = 0.0
     epoch_accuracy_sum = 0.0
     iter_num = 0
@@ -28,16 +29,20 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             outputs = model(batch)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+            cls_loss = outputs.get("cls_loss", torch.tensor(0.0, device=device))
             ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss)
+            cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
+            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss) + (
+                cls_loss if isinstance(cls_loss, torch.Tensor) else cls_loss)
             total_loss_value = total_loss.item()
 
             epoch_loss_sum += loss_value
             epoch_total_loss_sum += total_loss_value
             running_ks_loss += ks_loss_value
+            running_cls_loss += cls_loss_value
             running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
 
             total_loss.backward()
@@ -59,17 +64,19 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             if iter_num % 5 == 0:
                 writer.add_scalar('Train/Loss_Batch', loss_value, global_step)
                 writer.add_scalar('Train/KS_Loss_Batch', ks_loss_value, global_step)
+                writer.add_scalar('Train/Cls_Loss_Batch', cls_loss_value, global_step)
                 writer.add_scalar('Train/Total_Loss_Batch', total_loss_value, global_step)
                 writer.add_scalar('Train/Accuracy_Batch', acc, global_step)
 
             if iter_num % 5 == 0:
                 avg_loss = epoch_loss_sum / iter_num
                 avg_ks_loss = running_ks_loss / iter_num
+                avg_cls_loss = running_cls_loss / iter_num
                 avg_total_loss = epoch_total_loss_sum / iter_num
 
                 if "ks_loss" in outputs and optimizer_k is not None:
                     log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
-                              f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
+                              f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, cls_loss: {avg_cls_loss:.4f}, "
                               f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}")
                 else:
                     log_msg = f"Epoch: {epoch}, Iter: {iter_num}, Loss: {avg_loss:.4f}, Acc: {acc:.4f}"
@@ -80,14 +87,16 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
     avg_ks_loss = running_ks_loss / iter_num
     avg_total_loss = epoch_total_loss_sum / iter_num
     avg_accuracy = epoch_accuracy_sum / iter_num
+    avg_cls_loss = running_cls_loss / iter_num
 
     writer.add_scalar('Train/Loss_Epoch', avg_epoch_loss, epoch)
     writer.add_scalar('Train/KS_Loss_Epoch', avg_ks_loss, epoch)
+    writer.add_scalar('Train/Cls_Loss_Epoch', avg_cls_loss, epoch)
     writer.add_scalar('Train/Total_Loss_Epoch', avg_total_loss, epoch)
     writer.add_scalar('Train/Accuracy_Epoch', avg_accuracy, epoch)
 
     log_msg = (f"==> End of Epoch {epoch}, Avg Primary Loss: {avg_epoch_loss:.4f}, "
-              f"Avg KS Loss: {avg_ks_loss:.4f}, Avg Total Loss: {avg_total_loss:.4f}")
+              f"Avg KS Loss: {avg_ks_loss:.4f}, Avg CLS Loss: {avg_cls_loss:.4f}, Avg Total Loss: {avg_total_loss:.4f}")
     print(log_msg)
     logger.info(log_msg)
 

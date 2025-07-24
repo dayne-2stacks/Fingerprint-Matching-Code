@@ -146,15 +146,13 @@ class Net(CNN):
         self.final_row = nn.Sequential(
             nn.Linear(self.univ_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(8, 1)
         )
 
         self.final_col = nn.Sequential(
             nn.Linear(self.univ_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(8, 1)
         )
 
         self.k_params_id += [id(item) for item in self.final_row.parameters()]
@@ -371,23 +369,27 @@ class Net(CNN):
             out_emb_col = torch.nn.functional.pad(out_emb_col, (0, 0, 0, dummy_col), value=float('-inf')).permute(0, 2, 1)
             global_row_emb = self.maxpool(out_emb_row).squeeze(-1)
             global_col_emb = self.maxpool(out_emb_col).squeeze(-1)
-            k_row = self.final_row(global_row_emb).squeeze(-1)
-            k_col = self.final_col(global_col_emb).squeeze(-1)
+            k_row_logit = self.final_row(global_row_emb).squeeze(-1)
+            k_col_logit = self.final_col(global_col_emb).squeeze(-1)
             if self.mean_k:
-                ks = (k_row + k_col) / 2
+                k_logits = (k_row_logit + k_col_logit) / 2
             else:
-                ks = k_row
+                k_logits = k_row_logit
+            ks = torch.sigmoid(k_logits)
 
 
         else:
             ks = gt_ks / min_point_tensor
 
+        cls_loss = torch.tensor(0.0, device=s.device)
         # In classification mode, adjust ground truth k based on label
         if 'label' in data_dict:
-            label_tensor = data_dict['label'].to(s.device).view(-1)
+            label_tensor = data_dict['label'].to(s.device).view(-1).float()
             pred_val = ks.detach() * min_point_tensor
             gt_ks = torch.where(label_tensor == 1, pred_val,
                                torch.zeros_like(pred_val))
+            cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                k_logits, label_tensor)
             
         if self.training:
             print("Training mode, using ground truth ks")
@@ -430,6 +432,8 @@ class Net(CNN):
                 'perm_mat': x_list[0],
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
+                'cls_loss': cls_loss,
+                'cls_prob': ks,
                 # 'match_prob': match_prob
             })
         

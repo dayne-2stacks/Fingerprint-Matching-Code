@@ -32,7 +32,7 @@ from utils.matching import build_matches
 
 start_epoch = float('inf')
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
-config_files = [ "stage5.yml" ]
+config_files = ["stage4.yml", "stage5.yml" ]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -40,6 +40,9 @@ start_file = start_path / "checkpoint.json"
 # Create TensorBoard log directory
 log_dir = Path("logs/tensorboard")
 log_dir.mkdir(parents=True, exist_ok=True)
+
+PRETRAINED_PATH = "results/base/params/best_model.pt" 
+
 
 for file in config_files:
     scheduler = scheduler_k = None
@@ -88,8 +91,7 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "results/binary-classifier"
-    PRETRAINED_PATH = "results/base/params/best_model.pt" 
+    OUTPUT_PATH = "results/binary-classifier-2"
 
     # =====================================================
     # Setup Logging
@@ -259,7 +261,7 @@ for file in config_files:
             optimizer_k.load_state_dict(torch.load(optim_k_path))
         except FileNotFoundError:
             print("No optimizer_k checkpoint found; starting fresh for k_params.")
-    
+    PRETRAINED_PATH = ""  # Clear after loading to avoid reloading in next stages
     # Initialize warmup scheduler learning rates after loading optimizer state
     # if start_epoch == 0:  # Only for fresh training, not resuming
     print("Initializing warmup learning rates for first epoch...")
