@@ -77,15 +77,18 @@ class GMDataset(Dataset):
         if self.task == 'classify':
             # For classification we rely on the genuine/imposter pairs
             pairs, total_len = self.bm.get_rand_id_combination()
-            # ``length`` may request a subset of the available pairs. This
-            # allows stage 4 to train on a smaller sample of genuine and
-            # imposter matches.
-            if length is not None and length < total_len:
-                random.shuffle(pairs[0])
-                pairs[0] = pairs[0][:length]
-                self.length = length
-            else:
+
+            if self.bm.sets == 'test':
+                # In test mode always use the full set of pairs
                 self.length = total_len
+            else:
+                # ``length`` may request a subset of pairs during training
+                if length is not None and length < total_len:
+                    pairs[0] = pairs[0][:length]
+                    self.length = length
+                else:
+                    self.length = total_len
+
             self.id_combination = pairs
             self.length_list = [self.length]
         else:
