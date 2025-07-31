@@ -68,8 +68,8 @@ class GMDataset(Dataset):
             self.classes = [self.cls]
 
         self.problem_type = problem
-        print(f"Classes: {self.classes}")
-        print(f"Benchmark type: {type(self.bm)}")
+        # print(f"Classes: {self.classes}")
+        # print(f"Benchmark type: {type(self.bm)}")
         if len(self.classes) > 0:
             self.img_num_list = self.bm.compute_img_num(self.classes[0])
         else:

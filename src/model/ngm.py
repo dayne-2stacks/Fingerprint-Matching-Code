@@ -392,11 +392,11 @@ class Net(CNN):
                 k_logits, label_tensor)
             
         if self.training:
-            print("Training mode, using ground truth ks")
+            # print("Training mode, using ground truth ks")
             _, ss_out = soft_topk(ss, gt_ks.view(-1), SK_ITER_NUM, self.tau, n_points[idx1], n_points[idx2],
                                 True)
         else:
-            print("Inference mode, using predicted ks")
+            # print("Inference mode, using predicted ks")
             _, ss_out = soft_topk(ss, ks.view(-1) * min_point_tensor, SK_ITER_NUM, self.tau, n_points[idx1],
                                     n_points[idx2], True)
 

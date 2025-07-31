@@ -32,7 +32,8 @@ from utils.matching import build_matches
 
 start_epoch = float('inf')
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
-config_files = ["stage4.yml", "stage5.yml" ]
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
+config_files = ["stage4.yml" ]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -91,13 +92,13 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
-    OUTPUT_PATH = "results/binary-classifier-2"
+    OUTPUT_PATH = "results/binary-classifier"
 
     # =====================================================
     # Setup Logging
     # =====================================================
     logging.basicConfig(
-        filename='fp1.log', 
+        filename='fp.log', 
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
@@ -379,7 +380,7 @@ for file in config_files:
        
         
         # ---- Test Evaluation Periodically ----
-        if epoch % 10 == 0:
+        if epoch % 5 == 0:
             test_evaluation(
                 model,
                 test_dataloader,
@@ -387,6 +388,7 @@ for file in config_files:
                 device,
                 writer,
                 epoch,
+                stage,
             )
     
     # Close the TensorBoard writer at the end of this training stage

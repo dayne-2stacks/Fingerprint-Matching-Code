@@ -1,6 +1,7 @@
 from random import randint, uniform
 import cv2
 import numpy as np
+import math
 
 from scipy.ndimage import map_coordinates
 
@@ -23,7 +24,7 @@ def augment_image(image, annotation, min_points=5):
     transform_permutation = np.random.permutation(transforms)
 
     # Decide how many transformations to apply (1 to 4)
-    num_transforms = randint(1, len(transforms))
+    num_transforms = randint(1, math.ceil(len(transforms)/2))
     
     # Select the first num_transforms from the permutation
     selected_transforms = transform_permutation[:num_transforms]

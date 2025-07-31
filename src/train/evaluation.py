@@ -94,12 +94,27 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
             test_accuracy_sum += acc
 
             if stage == 4 and 'label' in batch:
-                lbl = batch['label'].item() if isinstance(batch['label'], torch.Tensor) else float(batch['label'])
-                if lbl == 1 and genuine_pair is None:
-                    genuine_pair = (batch, outputs)
-                elif lbl == 0 and imposter_pair is None:
-                    imposter_pair = (batch, outputs)
+                # Handle batch of labels instead of assuming single element
+                labels = batch['label'] if isinstance(batch['label'], torch.Tensor) else torch.tensor(batch['label'])
+                
+                # Process each sample in the batch
+                for i, lbl in enumerate(labels):
+                    lbl_val = lbl.item() if isinstance(lbl, torch.Tensor) else float(lbl)
+                    
+                    if lbl_val == 1 and genuine_pair is None:
+                        # Extract single sample from batch for genuine pair
+                        single_batch = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in batch.items()}
+                        single_outputs = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in outputs.items()}
+                        genuine_pair = (single_batch, single_outputs)
+                    elif lbl_val == 0 and imposter_pair is None:
+                        # Extract single sample from batch for imposter pair
+                        single_batch = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in batch.items()}
+                        single_outputs = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in outputs.items()}
+                        imposter_pair = (single_batch, single_outputs)
 
+                    if genuine_pair is not None and imposter_pair is not None:
+                        break
+                
                 if genuine_pair is not None and imposter_pair is not None:
                     continue
 
