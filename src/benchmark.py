@@ -149,13 +149,18 @@ class L3SFV2AugmentedBenchmark(Benchmark):
                     continue
                 imposter_pairs.append((base, groups[other_fid][0]))
 
-        # Balance the number of pairs so we have equal genuine and imposter
-        pair_count = min(len(genuine_pairs), len(imposter_pairs))
         random.shuffle(genuine_pairs)
         random.shuffle(imposter_pairs)
-        pairs = genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
-        random.shuffle(pairs)
 
+        if self.sets == 'test':
+            # In test mode return all pairs without balancing the counts
+            pairs = genuine_pairs + imposter_pairs
+        else:
+            # Balance the number of pairs so we have equal genuine and imposter
+            pair_count = min(len(genuine_pairs), len(imposter_pairs))
+            pairs = genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
+
+        random.shuffle(pairs)
         return pairs
     
     def get_data(self, ids, test=False, shuffle=True):
