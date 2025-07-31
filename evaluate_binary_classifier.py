@@ -22,12 +22,14 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 import torch
+from utils.matching import build_matches
 
 from src.benchmark import L3SFV2AugmentedBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import load_model
+from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 
 
 def evaluate():
@@ -62,9 +64,11 @@ def evaluate():
 
     all_labels = []
     all_probs = []
-
+    iteration = 0
     with torch.no_grad():
         for batch in dataloader:
+            iteration += 1
+            
             batch = data_to_cuda(batch)
             outputs = match_net(batch)
             perm_mat = outputs["perm_mat"].detach()
@@ -74,9 +78,30 @@ def evaluate():
             prob = (k_pred / min_points).clamp(0, 1)
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
+            if iteration % 5 == 0:
+                print(f"Processed {iteration} batches...")
+                
 
     all_probs = torch.cat(all_probs).numpy()
     all_labels = torch.cat(all_labels).numpy()
+
+    # Debug: Check label distribution
+    print(f"Total samples: {len(all_labels)}")
+    print(f"Genuine matches (label=1): {np.sum(all_labels == 1)}")
+    print(f"Imposter matches (label=0): {np.sum(all_labels == 0)}")
+    print(f"Unique labels: {np.unique(all_labels)}")
+    
+    # If no genuine matches, let's check the first few batches manually
+    if np.sum(all_labels == 1) == 0:
+        print("No genuine matches found! Checking first few batches...")
+        debug_dataloader = get_dataloader(dataset, shuffle=False, fix_seed=True)
+        for i, batch in enumerate(debug_dataloader):
+            if i >= 5:  # Check first 5 batches
+                break
+            batch = data_to_cuda(batch)
+            labels = batch["label"].cpu().numpy()
+            print(f"Batch {i}: labels = {labels}")
+                
 
     fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
     fnr = 1 - tpr
@@ -100,6 +125,103 @@ def evaluate():
 
     out_dir = Path("results/binary-classifier")
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Visualize one genuine match (label == 1) from the network
+    for i, (label, prob) in enumerate(zip(all_labels, all_probs)):
+        if label == 1:
+            # Re-run the dataloader to get the corresponding batch and visualize
+            count = 0
+            for batch in get_dataloader(dataset, shuffle=False, fix_seed=True):
+                batch = data_to_cuda(batch)
+                batch_label = batch["label"].cpu().numpy()[0]
+                if batch_label == 1:
+                    # Run the model to get outputs
+                    with torch.no_grad():
+                        outputs = match_net(batch)
+                    
+                    # Get keypoints
+                    if 'Ps' in batch:
+                        kp0 = batch['Ps'][0][0].cpu().numpy()
+                        kp1 = batch['Ps'][1][0].cpu().numpy()
+                    else:
+                        # Fallback keypoints if not available
+                        kp0 = np.array([[100, 100], [150, 150], [200, 200]])
+                        kp1 = np.array([[110, 110], [160, 160], [210, 210]])
+                    
+                    # Get images
+                    if "images" in batch:
+                        img0 = batch["images"][0][0]
+                        img1 = batch["images"][1][0]
+                        img0 = to_grayscale_cv2_image(img0)
+                        img1 = to_grayscale_cv2_image(img1)
+                    else:
+                        # Create placeholder images if not available
+                        img0 = np.zeros((240, 320), dtype=np.uint8)
+                        img1 = np.zeros((240, 320), dtype=np.uint8)
+                    
+                    # Get matching matrices
+                    ds_mat = outputs["ds_mat"].cpu().numpy()[0]
+                    per_mat = outputs["perm_mat"].cpu().numpy()[0]
+                    
+                    # Build matches using the same function as train.py
+                    matches = build_matches(ds_mat, per_mat)
+                    
+                    # Visualize matches using the same function as train.py
+                    visualize_match(img0, img1, kp0, kp1, matches, 
+                                  prefix=str(out_dir) + "/", 
+                                  filename="genuine_match_example")
+                    
+                    # Also visualize the stochastic matrix
+
+                    
+                    print(f"Genuine match visualization saved with {len(matches)} matches")
+                    print(f"Probability: {prob:.4f}")
+                    break
+                count += 1
+            break
+    
+    # Do the same for an imposter match (label == 0)
+    for i, (label, prob) in enumerate(zip(all_labels, all_probs)):
+        if label == 0:
+            count = 0
+            for batch in get_dataloader(dataset, shuffle=False, fix_seed=True):
+                batch = data_to_cuda(batch)
+                batch_label = batch["label"].cpu().numpy()[0]
+                if batch_label == 0:
+                    with torch.no_grad():
+                        outputs = match_net(batch)
+                    
+                    if 'Ps' in batch:
+                        kp0 = batch['Ps'][0][0].cpu().numpy()
+                        kp1 = batch['Ps'][1][0].cpu().numpy()
+                    else:
+                        kp0 = np.array([[100, 100], [150, 150], [200, 200]])
+                        kp1 = np.array([[110, 110], [160, 160], [210, 210]])
+                    
+                    if "images" in batch:
+                        img0 = batch["images"][0][0]
+                        img1 = batch["images"][1][0]
+                        img0 = to_grayscale_cv2_image(img0)
+                        img1 = to_grayscale_cv2_image(img1)
+                    else:
+                        img0 = np.zeros((240, 320), dtype=np.uint8)
+                        img1 = np.zeros((240, 320), dtype=np.uint8)
+                    
+                    ds_mat = outputs["ds_mat"].cpu().numpy()[0]
+                    per_mat = outputs["perm_mat"].cpu().numpy()[0]
+                    matches = build_matches(ds_mat, per_mat)
+                    
+                    visualize_match(img0, img1, kp0, kp1, matches, 
+                                  prefix=str(out_dir) + "/", 
+                                  filename="imposter_match_example")
+                    
+           
+                    
+                    print(f"Imposter match visualization saved with {len(matches)} matches")
+                    print(f"Probability: {prob:.4f}")
+                    break
+                count += 1
+            break
 
     logging.basicConfig(
         filename=str(out_dir / "eval.log"),

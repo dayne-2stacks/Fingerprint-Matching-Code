@@ -1,0 +1,2 @@
+accuracy,precision,recall,f1_score,roc_auc,pr_auc,far,frr
+1.0,1.0,1.0,1.0,1.0,1.0,0.0,0.0
