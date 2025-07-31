@@ -45,7 +45,7 @@ def evaluate():
         train_root=data_root,
         task="classify",
     )
-    dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
+    dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM", augment=False)
     dataloader = get_dataloader(dataset, shuffle=False, fix_seed=True)
 
     match_net = Net(regression=True)

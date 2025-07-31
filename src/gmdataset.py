@@ -13,6 +13,24 @@ from utils.augmentation import augment_image
 from itertools import combinations
 
 
+def _standardize(image, annotation):
+    """Resize to 320x320 and center crop to 240x320."""
+    h, w = image.shape[:2]
+    resized = cv2.resize(image, (320, 320))
+    scale_x, scale_y = 320 / w, 320 / h
+    annos = [[id_, x * scale_x, y * scale_y] for id_, x, y in annotation]
+    crop_h, crop_w = 240, 320
+    start_x = (320 - crop_w) // 2
+    start_y = (320 - crop_h) // 2
+    cropped = resized[start_y:start_y + crop_h, start_x:start_x + crop_w]
+    cropped_annos = [
+        [id_, x - start_x, y - start_y]
+        for id_, x, y in annos
+        if start_x <= x < start_x + crop_w and start_y <= y < start_y + crop_h
+    ]
+    return cropped, cropped_annos
+
+
 
 RESCALE=(320, 240)
 SRC_GRAPH_CONSTRUCT="tri"
@@ -30,12 +48,16 @@ DATALOADER_NUM=6
 
 
 class GMDataset(Dataset):
-    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM'):
+    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
         self.name = name
         self.bm = bm
         self.using_all_graphs = using_all_graphs
         self.obj_size = self.bm.obj_resize
         self.test = True if self.bm.sets == 'test' else False
+        if augment is None:
+            self.augment = self.bm.sets == 'train'
+        else:
+            self.augment = augment
         self.cls = None if cls in ['none', 'all'] else cls
 
         self.task = getattr(self.bm, 'task', 'match')
@@ -127,37 +149,27 @@ class GMDataset(Dataset):
         original_img = cv2.imread(self.bm.get_path(id_list[0]))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
-        n_common = 0
-        while n_common <= 3:
-            # Generate two distinct augmented versions of the same image
-            img1, annos1 = augment_image(original_img, original_annos)
-            img2, annos2 = augment_image(original_img, original_annos)
-            
-            # save_path_1 = f"augmented_pair_{idx}_1.jpg"
-            # save_path_2 = f"augmented_pair_{idx}_2.jpg"
-            # cv2.imwrite(save_path_1, img1)
-            # cv2.imwrite(save_path_2, img2)
-            
-            
-            # Find common keypoints (by label)
-            labels1 = set(a[0] for a in annos1)
-            labels2 = set(a[0] for a in annos2)
-            common_labels = labels1.intersection(labels2)
+        if self.augment:
+            n_common = 0
+            while n_common <= 3:
+                img1, annos1 = augment_image(original_img, original_annos)
+                img2, annos2 = augment_image(original_img, original_annos)
+                labels1 = set(a[0] for a in annos1)
+                labels2 = set(a[0] for a in annos2)
+                common_labels = labels1.intersection(labels2)
+                n_common = len(common_labels)
+
+            annos1_filtered = [a for a in annos1 if a[0] in common_labels]
+            annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+            perm_mat = np.eye(n_common, dtype=np.float32)
+        else:
+            img1, annos1 = _standardize(original_img, original_annos)
+            img2, annos2 = _standardize(original_img, original_annos)
+            common_labels = [a[0] for a in annos1]
             n_common = len(common_labels)
-
-        # Update annotations: if a keypoint is not common, change its label to "outlier"
-        annos1_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos1]
-        annos2_updated = [a if a[0] in common_labels else ( "outlier", *a[1:] ) for a in annos2]
-        
-        # Filter annotations for common keypoints
-        annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-        annos2_filtered = [a for a in annos2 if a[0] in common_labels]
-
-        # Create permutation matrix based on matching labels
-        sorted_labels = sorted(common_labels)
-        label_to_idx = {label: i for i, label in enumerate(sorted_labels)}
-        
-        perm_mat = np.eye(n_common, dtype=np.float32)
+            annos1_filtered = annos1
+            annos2_filtered = annos2
+            perm_mat = np.eye(n_common, dtype=np.float32)
 
 
         # create permutation pair
@@ -272,27 +284,28 @@ class GMDataset(Dataset):
         label = 1 if fid0 == fid1 else 0
 
         if label == 1:
-            # Augment the same image twice
             img_path = self.bm.get_path(pair[0])
             original_img = cv2.imread(img_path)
             original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
 
-            n_common = 0
-            while n_common <= 3:
-                img1, annos1 = augment_image(original_img, original_annos)
-                img2, annos2 = augment_image(original_img, original_annos)
-
-                labels1 = set(a[0] for a in annos1)
-                labels2 = set(a[0] for a in annos2)
-                common_labels = labels1.intersection(labels2)
-                n_common = len(common_labels)
-
-            annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-            annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+            if self.augment:
+                n_common = 0
+                while n_common <= 3:
+                    img1, annos1 = augment_image(original_img, original_annos)
+                    img2, annos2 = augment_image(original_img, original_annos)
+                    labels1 = set(a[0] for a in annos1)
+                    labels2 = set(a[0] for a in annos2)
+                    common_labels = labels1.intersection(labels2)
+                    n_common = len(common_labels)
+                annos1_filtered = [a for a in annos1 if a[0] in common_labels]
+                annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+            else:
+                img1, annos1_filtered = _standardize(original_img, original_annos)
+                img2, annos2_filtered = _standardize(original_img, original_annos)
+                n_common = len(annos1_filtered)
 
             perm_mat = np.eye(n_common, dtype=np.float32)
         else:
-            # Imposter pair: augment two different images and use zero perm matrix
             img_path1 = self.bm.get_path(pair[0])
             img_path2 = self.bm.get_path(pair[1])
             img1_orig = cv2.imread(img_path1)
@@ -300,8 +313,12 @@ class GMDataset(Dataset):
             annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
-            img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-            img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+            if self.augment:
+                img1, annos1_filtered = augment_image(img1_orig, annos1_base)
+                img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+            else:
+                img1, annos1_filtered = _standardize(img1_orig, annos1_base)
+                img2, annos2_filtered = _standardize(img2_orig, annos2_base)
 
             perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
             n_common = 0

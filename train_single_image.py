@@ -22,12 +22,15 @@ benchmark = L3SFV2AugmentedBenchmark(
     )
 
 
-image_dataset = GMDataset("L3SFV2Augmented",
-                     benchmark,
-                     dataset_len,
-                     True,
-                     None,
-                     "2GM")
+image_dataset = GMDataset(
+    "L3SFV2Augmented",
+    benchmark,
+    dataset_len,
+    True,
+    None,
+    "2GM",
+    augment=True,
+)
 
 dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
 

@@ -25,9 +25,9 @@ def build_dataloaders(train_root: str, dataset_len: int, task: str = 'match'):
         task=task
     )
 
-    image_dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
-    test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM")
-    val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM")
+    image_dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM", augment=True)
+    test_dataset = GMDataset("L3SFV2Augmented", test_bm, dataset_len, True, None, "2GM", augment=False)
+    val_dataset = GMDataset("L3SFV2Augmented", val_bm, dataset_len, True, None, "2GM", augment=False)
 
     dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=False)
     test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)

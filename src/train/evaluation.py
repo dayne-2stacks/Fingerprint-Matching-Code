@@ -66,13 +66,15 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
     return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
 
 
-def test_evaluation(model, dataloader, criterion, device, writer, epoch):
+def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None):
     model.eval()
     test_loss_sum = 0.0
     test_accuracy_sum = 0.0
     test_cls_sum = 0.0
     last_batch = None
     last_outputs = None
+    genuine_pair = None
+    imposter_pair = None
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
@@ -91,6 +93,16 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch):
             test_cls_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
             test_accuracy_sum += acc
 
+            if stage == 4 and 'label' in batch:
+                lbl = batch['label'].item() if isinstance(batch['label'], torch.Tensor) else float(batch['label'])
+                if lbl == 1 and genuine_pair is None:
+                    genuine_pair = (batch, outputs)
+                elif lbl == 0 and imposter_pair is None:
+                    imposter_pair = (batch, outputs)
+
+                if genuine_pair is not None and imposter_pair is not None:
+                    continue
+
             if batch_idx == 0:
                 last_batch = batch
                 last_outputs = outputs
@@ -103,21 +115,21 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch):
     writer.add_scalar('Test/Cls_Loss', avg_test_cls, epoch)
     writer.add_scalar('Test/Accuracy', avg_test_accuracy, epoch)
 
-    if last_batch is not None and last_outputs is not None:
-        if 'Ps' in last_batch:
-            kp0 = last_batch['Ps'][0][0].cpu().numpy()
-            kp1 = last_batch['Ps'][1][0].cpu().numpy()
+    def _visualize(batch, outputs, tag):
+        if 'Ps' in batch:
+            kp0 = batch['Ps'][0][0].cpu().numpy()
+            kp1 = batch['Ps'][1][0].cpu().numpy()
         else:
             kp0 = np.array([[100, 100], [150, 150], [200, 200]])
             kp1 = np.array([[110, 110], [160, 160], [210, 210]])
 
-        ds_mat = last_outputs["ds_mat"].cpu().numpy()[0]
-        per_mat = last_outputs["perm_mat"].cpu().numpy()[0]
+        ds_mat = outputs["ds_mat"].cpu().numpy()[0]
+        per_mat = outputs["perm_mat"].cpu().numpy()[0]
         matches = build_matches(ds_mat, per_mat)
 
-        if "id_list" in last_batch:
-            img0 = last_batch["images"][0][0]
-            img1 = last_batch["images"][1][0]
+        if "id_list" in batch:
+            img0 = batch["images"][0][0]
+            img1 = batch["images"][1][0]
         else:
             img0 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_0.jpg")
             img1 = cv2.imread("/green/data/L3SF_V2/L3SF_V2_Augmented/R1/8_right_loop_aug_1.jpg")
@@ -125,13 +137,22 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch):
         img0 = to_grayscale_cv2_image(img0)
         img1 = to_grayscale_cv2_image(img1)
 
-        match_path = f"photos/test_photos/match_{epoch}.jpg"
-        visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos/", filename=f"match_{epoch}.jpg")
+        match_path = f"photos/test_photos/{tag}_{epoch}.jpg"
+        visualize_match(img0, img1, kp0, kp1, matches, prefix="photos/test_photos/", filename=f"{tag}_{epoch}.jpg")
 
         if os.path.exists(match_path):
             match_img = cv2.imread(match_path)
             match_img = cv2.cvtColor(match_img, cv2.COLOR_BGR2RGB)
-            writer.add_image(f'Test/Matches', match_img.transpose(2, 0, 1), epoch, dataformats='CHW')
+            writer.add_image(f'Test/{tag.capitalize()}', match_img.transpose(2, 0, 1), epoch, dataformats='CHW')
+
+    if last_batch is not None and last_outputs is not None:
+        _visualize(last_batch, last_outputs, 'match')
+
+    if stage == 4:
+        if genuine_pair is not None:
+            _visualize(genuine_pair[0], genuine_pair[1], 'genuine_match')
+        if imposter_pair is not None:
+            _visualize(imposter_pair[0], imposter_pair[1], 'imposter_match')
 
     print(f"Epoch {epoch}: Test Loss = {avg_test_loss:.4f}, CLS Loss = {avg_test_cls:.4f}, Test Accuracy = {avg_test_accuracy:.4f}")
     return avg_test_loss, avg_test_accuracy

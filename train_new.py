@@ -40,7 +40,15 @@ benchmark = L3SFV2AugmentedBenchmark(
 )
 print(benchmark.get_path("R1_47_right_loop_aug_1"))
 
-image_dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM")
+image_dataset = GMDataset(
+    "L3SFV2Augmented",
+    benchmark,
+    dataset_len,
+    True,
+    None,
+    "2GM",
+    augment=True,
+)
 dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
 
 # -------------------------------
