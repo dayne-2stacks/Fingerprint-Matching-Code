@@ -112,7 +112,8 @@ class L3SFV2AugmentedBenchmark(Benchmark):
     # ------------------------------------------------------------------
     def _finger_id(self, cls_name: str) -> str:
         """Return the finger identifier without the session prefix."""
-        return cls_name.split('_', 1)[1] if '_' in cls_name else cls_name
+        # return cls_name.split('_', 1)[1] if '_' in cls_name else cls_name
+        return cls_name
 
     def _build_classify_pairs(self):
         """Generate genuine and imposter pairs for the classification task."""
