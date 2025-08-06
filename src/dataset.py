@@ -72,23 +72,26 @@ class L3SFV2AugmentedDataset:
             raise ValueError("sets must be one of 'train', 'test', or 'val'.")
 
     def _collect_images(self, root_dirs):
-        """Collect image files according to the chosen task and split."""
+        """Collect image files (jpg or png) according to the chosen task and split."""
         images = []
 
         for dir_path in root_dirs:
             if not dir_path.exists():
                 print(f"Directory {dir_path} does not exist; skipping it.")
                 continue
-            for img_file in dir_path.glob("*.jpg"):
-                images.append(img_file)
+            for ext in ("*.jpg", "*.png"):
+                for img_file in dir_path.glob(ext):
+                    images.append(img_file)
         return images
 
 
     def _get_keypoints(self, img_path):
         """
-        Retrieve keypoint annotations for the given image from a TSV file.
-        Assumes the TSV file (located in the same folder as the image) has headers "x" and "y".
-        
+        Retrieve keypoint annotations for the given image from a TSV, CSV, or TXT file.
+        - TSV: tab-delimited, with header row ("x", "y")
+        - CSV: comma-delimited, with header row ("x", "y")
+        - TXT: comma-delimited, no header row, just x,y per line
+
         Returns:
             A list of dictionaries, each containing:
             - "x": x-coordinate (float)
@@ -96,28 +99,56 @@ class L3SFV2AugmentedDataset:
             - "labels": unique keypoint label constructed as
               ``{folder}_{file_stem}_{index}``
         """
-        tsv_file = img_path.parent / (img_path.stem + '.tsv')
+        possible_exts = ['.tsv', '.csv', '.txt']
+        anno_file = None
+        delimiter = None
+        ext_used = None
+
+        for ext in possible_exts:
+            candidate = img_path.parent / (img_path.stem + ext)
+            if candidate.exists():
+                anno_file = candidate
+                delimiter = '\t' if ext == '.tsv' else ','
+                ext_used = ext
+                break
+
         keypoints = []
-        if not tsv_file.exists():
-            print(f"Warning: Keypoint file {tsv_file} not found for image {img_path.name}.")
+        if not anno_file:
+            print(f"Warning: Keypoint file not found for image {img_path.name}.")
             return keypoints
 
+        prefix = f"{img_path.parent.name}_{img_path.stem}"
         try:
-            with open(tsv_file, 'r') as f:
-                reader = csv.DictReader(f, delimiter='\t')
-                prefix = f"{img_path.parent.name}_{img_path.stem}"
-                for i, row in enumerate(reader):
-                    try:
-                        x = float(row['x'])
-                        y = float(row['y'])
-                        label = f"{prefix}_{i}"
-                        keypoints.append({"labels": label, "x": x, "y": y})
-                    except Exception as e:
-                        print(f"Error reading row in {tsv_file}: {e}")
-                        continue
+            if ext_used == '.txt':
+                with open(anno_file, 'r') as f:
+                    for i, line in enumerate(f):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            x_str, y_str = line.split(',')
+                            x = float(x_str)
+                            y = float(y_str)
+                            label = f"{prefix}_{i}"
+                            keypoints.append({"labels": label, "x": x, "y": y})
+                        except Exception as e:
+                            print(f"Error reading line in {anno_file}: {e}")
+                            continue
+            else:
+                with open(anno_file, 'r') as f:
+                    reader = csv.DictReader(f, delimiter=delimiter)
+                    for i, row in enumerate(reader):
+                        try:
+                            x = float(row['x'])
+                            y = float(row['y'])
+                            label = f"{prefix}_{i}"
+                            keypoints.append({"labels": label, "x": x, "y": y})
+                        except Exception as e:
+                            print(f"Error reading row in {anno_file}: {e}")
+                            continue
         except Exception as e:
-            print(f"Error opening {tsv_file}: {e}")
-        
+            print(f"Error opening {anno_file}: {e}")
+
         return keypoints
         
 
@@ -222,17 +253,127 @@ class L3SFV2AugmentedDataset:
         }
         
         return anno_dict
+
+
+class PolyUDBII(L3SFV2AugmentedDataset):
+    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU',
+                 test_root=None, val_root=None, cache_path='cache', task='match'):
+        super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
-    
+    def _get_root_dirs(self, sets, train_root, test_root, val_root):
+        """Return a list of Path objects for image search."""
+        if sets == 'train':
+            return [Path(os.path.join(train_root, "train"))]
+        elif sets == 'test':
+            return [Path(os.path.join(train_root, "test"))]
+        elif sets == 'val':
+            return [Path(os.path.join(train_root, "val"))]
+        else:
+            raise ValueError("sets must be one of 'train', 'test', or 'val'.")
+        
+    def process(self):
+        """
+        Process the images to create a JSON annotation file.
+        
+        The annotation dictionary for each image includes:
+        - "path": full path to the image.
+        - "cls": subject name formed by the folder and file stem joined by an underscore.
+        - "bounds": fixed bounding box [0, 0, 319, 240].
+        - "kpts": list of keypoints (each with "labels", "x", "y").
+        - "univ_size": number of keypoints.
+        """
+            
+        data_dict = {}
+        
+        # PolyUDBII: cls_name is {dbname}_{id} from {dbname}_{id}_{session}_{position}
+        # unique_id is the full stem: {dbname}_{id}_{session}_{position}
+        for img_path in self.image_list:
+            file_stem = img_path.stem  # e.g., DBII_001_01_01
+            parts = file_stem.split('_')
+            if len(parts) >= 2:
+                cls_name = f"{parts[0]}_{parts[1]}"
+            else:
+                cls_name = file_stem  # fallback if unexpected format
+            unique_id = file_stem
+        
 
+            # Retrieve keypoints from the corresponding TSV file.
+            kpts = self._get_keypoints(img_path)
+            
+            with Image.open(str(img_path)) as img:
+                width, height = img.size
+            
+            xmax = min(320, width)
+            ymax = min(240, height)
+            fixed_bounds = [0, 0, xmax, ymax]
+            
+            # Build the annotation dictionary.
+            anno = {
+                "path": str(img_path),
+                "cls": cls_name,
+                "bounds": fixed_bounds,
+                "kpts": kpts,
+                "univ_size": len(kpts)
+            }
+            
+            # Optionally store additional info.
+            anno["obj_resize"] = self.obj_resize
+            
+            data_dict[unique_id] = anno
+        
+        output_dir = Path("data/PolyU-DBII")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"{self.sets}-{self.obj_resize}.json"
+        with open(output_file, "w") as f:
+            json.dump(data_dict, f, indent=4)
+        print(f"Annotation file saved at: {output_file}")
+        
+    def _get_anno_dict(self, img_path: Path):
+        """
+        Create an annotation dictionary for a given image, following the logic of PolyUDBII.process.
+        
+        The class name ("cls") is constructed as {dbname}_{id} from the file stem {dbname}_{id}_{session}_{position}.
+        The unique_id is the full file stem.
+        The bounding box is [0, 0, min(320, width), min(240, height)].
+        """
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image file {img_path} does not exist.")
 
+        file_stem = img_path.stem  # e.g., DBII_001_01_01
+        parts = file_stem.split('_')
+        if len(parts) >= 2:
+            cls_name = f"{parts[0]}_{parts[1]}"
+        else:
+            cls_name = file_stem  # fallback if unexpected format
+        unique_id = file_stem
+
+        with Image.open(str(img_path)) as img:
+            width, height = img.size
+
+        xmax = min(320, width)
+        ymax = min(240, height)
+        bounds = [0, 0, xmax, ymax]
+
+        keypoints = self._get_keypoints(img_path)
+
+        anno_dict = {
+            "path": str(img_path),
+            "cls": cls_name,
+            "bounds": bounds,
+            "kpts": keypoints,
+            "univ_size": len(keypoints),
+            "obj_resize": self.obj_resize
+        }
+
+        return anno_dict
+        
+        
 # Example usage:
 if __name__ == "__main__":
     # For training, images (and their corresponding csv files) are assumed to be in /green/data/L3SF in folders R1–R5.
-    dataset_train = L3SFV2AugmentedDataset(
+    dataset_train = PolyUDBII(
         sets='train',
         obj_resize=(320, 240),
-        train_root='dataset/Synthetic'
     )
-    dic = dataset_train._get_anno_dict(Path("dataset/Synthetic/R1/8_right_loop.jpg"))
+    dic = dataset_train._get_anno_dict(Path("dataset/PolyU/train/DBII_1_1_1.png"))
     print(dic["univ_size"])

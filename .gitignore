@@ -179,8 +179,8 @@ cython_debug/
 *.json
 result/*
 
-dataset
-dataset/*
+
+dataset/*/
 .nfs*
 logs/*
 events.*

@@ -103,13 +103,45 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                     
                     if lbl_val == 1 and genuine_pair is None:
                         # Extract single sample from batch for genuine pair
-                        single_batch = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in batch.items()}
-                        single_outputs = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in outputs.items()}
+                        single_batch = {}
+                        for k, v in batch.items():
+                            if isinstance(v, torch.Tensor) and v.dim() > 0:
+                                single_batch[k] = v[i:i+1]
+                            elif isinstance(v, list):
+                                single_batch[k] = [x[i:i+1] if isinstance(x, torch.Tensor) else x for x in v]
+                            else:
+                                single_batch[k] = v
+
+                        single_outputs = {}
+                        for k, v in outputs.items():
+                            if isinstance(v, torch.Tensor) and v.dim() > 0:
+                                single_outputs[k] = v[i:i+1]
+                            elif isinstance(v, list):
+                                single_outputs[k] = [x[i:i+1] if isinstance(x, torch.Tensor) else x for x in v]
+                            else:
+                                single_outputs[k] = v
+
                         genuine_pair = (single_batch, single_outputs)
                     elif lbl_val == 0 and imposter_pair is None:
                         # Extract single sample from batch for imposter pair
-                        single_batch = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in batch.items()}
-                        single_outputs = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in outputs.items()}
+                        single_batch = {}
+                        for k, v in batch.items():
+                            if isinstance(v, torch.Tensor) and v.dim() > 0:
+                                single_batch[k] = v[i:i+1]
+                            elif isinstance(v, list):
+                                single_batch[k] = [x[i:i+1] if isinstance(x, torch.Tensor) else x for x in v]
+                            else:
+                                single_batch[k] = v
+
+                        single_outputs = {}
+                        for k, v in outputs.items():
+                            if isinstance(v, torch.Tensor) and v.dim() > 0:
+                                single_outputs[k] = v[i:i+1]
+                            elif isinstance(v, list):
+                                single_outputs[k] = [x[i:i+1] if isinstance(x, torch.Tensor) else x for x in v]
+                            else:
+                                single_outputs[k] = v
+
                         imposter_pair = (single_batch, single_outputs)
 
                     if genuine_pair is not None and imposter_pair is not None:
