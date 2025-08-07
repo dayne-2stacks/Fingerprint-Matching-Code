@@ -5,7 +5,7 @@ from pathlib import Path
 from pygmtools.benchmark import Benchmark  # Import the original Benchmark class
 # Import your new dataset class.
 # (Adjust the import according to where your L3SFV2AugmentedDataset is defined.)
-from src.dataset import L3SFV2AugmentedDataset
+from src.dataset import L3SFV2AugmentedDataset, PolyUDBII
 from PIL import Image
 import random
 import itertools
@@ -24,9 +24,10 @@ class L3SFV2AugmentedBenchmark(Benchmark):
     """
 
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
-                 filter='intersection', task='match', **args):
+                 filter='intersection', task='match', dataset_cls=L3SFV2AugmentedDataset,
+                 name=None, **args):
         # Instead of a dataset name from a fixed list, we use our new dataset.
-        self.name = "L3SFV2Augmented"  # our custom dataset name
+        self.name = name if name is not None else getattr(dataset_cls, '__name__', 'CustomDataset')
         self.problem = problem
         self.filter = filter
         self.obj_resize = obj_resize
@@ -35,7 +36,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         # matching or classification mode.
         # (The dataset ``__init__`` is expected to generate the JSON files if
         # they do not exist.)
-        dataset_instance = L3SFV2AugmentedDataset(
+        dataset_instance = dataset_cls(
             sets,
             obj_resize,
             task=task,
@@ -57,7 +58,7 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         #
         # If your dataset class does not already define these, set them here:
         if not hasattr(dataset_instance, "dataset_dir"):
-            dataset_instance.dataset_dir = "data/L3SFV2Augmented"
+            dataset_instance.dataset_dir = f"data/{self.name}"
         if not hasattr(dataset_instance, "suffix"):
             dataset_instance.suffix = f"{obj_resize}"
 
@@ -416,3 +417,82 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         
         return id_combination_list, length
     
+
+class PolyUDBIIBenchmark(L3SFV2AugmentedBenchmark):
+    """Benchmark for the PolyU DBII dataset with classification pair logic."""
+
+    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+                 filter='intersection', task='match', **args):
+        super().__init__(
+            sets,
+            obj_resize=obj_resize,
+            problem=problem,
+            filter=filter,
+            task=task,
+            dataset_cls=PolyUDBII,
+            name="PolyU-DBII",
+            **args,
+        )
+
+    # ------------------------------------------------------------------
+    # PolyU DBII specific pair generation for classification
+    # ------------------------------------------------------------------
+    def _parse_id(self, img_id):
+        """Parse an image identifier into (person, session, stance).
+
+        Expected format: ``DBII_{person}_{session}_{stance}`` with integer
+        components. Returns ``(person, session, stance)`` or ``None`` if the
+        pattern does not match.
+        """
+        parts = img_id.split('_')
+        if len(parts) < 4:
+            return None
+        try:
+            person = int(parts[1])
+            session = int(parts[2])
+            stance = int(parts[3])
+            return person, session, stance
+        except ValueError:
+            return None
+
+    def _build_classify_pairs(self):
+        """Generate genuine and imposter pairs according to PolyU DBII protocol."""
+        # Parse ids into structured dictionary: person -> session -> stance -> id
+        parsed = {}
+        for img_id in self.data_dict.keys():
+            parsed_info = self._parse_id(img_id)
+            if not parsed_info:
+                continue
+            person, session, stance = parsed_info
+            parsed.setdefault(person, {}).setdefault(session, {})[stance] = img_id
+
+        genuine_pairs = []
+        for person, sessions in parsed.items():
+            if 1 in sessions and 2 in sessions:
+                s1 = sessions[1]
+                s2 = sessions[2]
+                for id1 in s1.values():
+                    for id2 in s2.values():
+                        genuine_pairs.append((id1, id2))
+
+        imposter_pairs = []
+        persons = list(parsed.keys())
+        for i, pa in enumerate(persons):
+            id_a = parsed[pa].get(1, {}).get(1)
+            if id_a is None:
+                continue
+            for pb in persons[i + 1:]:
+                id_b = parsed[pb].get(2, {}).get(1)
+                if id_b is not None:
+                    imposter_pairs.append((id_a, id_b))
+                    # also include reverse pairing to cover all A != B combinations
+                    id_a2 = parsed[pb].get(1, {}).get(1)
+                    id_b2 = parsed[pa].get(2, {}).get(1)
+                    if id_a2 is not None and id_b2 is not None:
+                        imposter_pairs.append((id_a2, id_b2))
+
+        if self.sets == 'test':
+            return genuine_pairs + imposter_pairs
+
+        pair_count = min(len(genuine_pairs), len(imposter_pairs))
+        return genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
