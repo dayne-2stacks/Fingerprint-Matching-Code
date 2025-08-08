@@ -11,6 +11,7 @@ from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
 from utils.augmentation import augment_image
 from itertools import combinations
+from src.model.ngm import UNIV_SIZE
 
 
 def _standardize(image, annotation):
@@ -43,7 +44,7 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=123
-BATCH_SIZE=12
+BATCH_SIZE=8
 DATALOADER_NUM=6
 
 
@@ -308,6 +309,14 @@ class GMDataset(Dataset):
                 n_common = len(annos1_filtered)
 
             perm_mat = np.eye(n_common, dtype=np.float32)
+
+            # Limit the number of keypoints to match the model's universal size
+            max_points = min(n_common, UNIV_SIZE)
+            if n_common > max_points:
+                annos1_filtered = annos1_filtered[:max_points]
+                annos2_filtered = annos2_filtered[:max_points]
+                n_common = max_points
+                perm_mat = np.eye(n_common, dtype=np.float32)
         else:
             img_path1 = self.bm.get_path(pair[0])
             img_path2 = self.bm.get_path(pair[1])
@@ -322,6 +331,13 @@ class GMDataset(Dataset):
             else:
                 img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                 img2, annos2_filtered = _standardize(img2_orig, annos2_base)
+
+            # Restrict keypoints for imposter pairs as well
+            max_points = UNIV_SIZE
+            if len(annos1_filtered) > max_points:
+                annos1_filtered = annos1_filtered[:max_points]
+            if len(annos2_filtered) > max_points:
+                annos2_filtered = annos2_filtered[:max_points]
 
             perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
             n_common = 0
@@ -373,7 +389,7 @@ class GMDataset(Dataset):
         return ret_dict
     
     
-class TestDataset(GMdataset):
+class TestDataset(GMDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

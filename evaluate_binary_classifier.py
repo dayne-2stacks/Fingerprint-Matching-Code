@@ -1,12 +1,14 @@
 """Evaluate the trained binary classifier and report common metrics.
 
 The script loads the best model from ``results/binary-classifier/params``
-and computes several verification metrics on the test split.  The computed
-metrics are saved in ``metrics.csv`` and ROC/PR curves are written as PNG
-files in the same directory.
+and computes several verification metrics on the test split of either the
+L3SFV2Augmented or PolyU DBII dataset.  The computed metrics are saved in
+``metrics.csv`` and ROC/PR curves are written as PNG files in the same
+directory.
 """
 
 from pathlib import Path
+import argparse
 import logging
 import numpy as np
 import pandas as pd
@@ -24,7 +26,7 @@ from sklearn.metrics import (
 import torch
 from utils.matching import build_matches
 
-from src.benchmark import L3SFV2AugmentedBenchmark
+from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
@@ -32,22 +34,31 @@ from utils.models_sl import load_model
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 
 
-def evaluate():
-    """Run evaluation using the best classifier model.
+def evaluate(dataset_name: str, data_root: str):
+    """Run evaluation using the best classifier model for the chosen dataset.
 
     Metrics are written to ``metrics.csv`` and also logged to ``eval.log``
     inside ``results/binary-classifier``.
     """
-    dataset_len = 640
-    data_root = "dataset/Synthetic"
+    dataset_len = None
 
-    benchmark = L3SFV2AugmentedBenchmark(
-        sets="test",
-        obj_resize=(320, 240),
-        train_root=data_root,
-        task="classify",
-    )
-    dataset = GMDataset("L3SFV2Augmented", benchmark, dataset_len, True, None, "2GM", augment=False)
+    if dataset_name == "PolyU-DBII":
+        benchmark = PolyUDBIIBenchmark(
+            sets="test",
+            obj_resize=(320, 240),
+            train_root=data_root,
+            task="classify",
+        )
+    else:
+        benchmark = L3SFV2AugmentedBenchmark(
+            sets="test",
+            obj_resize=(320, 240),
+            train_root=data_root,
+            task="classify",
+        )
+        dataset_name = "L3SFV2Augmented"
+
+    dataset = GMDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
     dataloader = get_dataloader(dataset, shuffle=False, fix_seed=True)
 
     match_net = Net(regression=True)
@@ -269,6 +280,24 @@ def evaluate():
         print(f"{k}: {v:.4f}")
         logger.info("%s: %.4f", k, v)
 
-
 if __name__ == "__main__":
-    evaluate()
+    parser = argparse.ArgumentParser(description="Evaluate the trained binary classifier")
+    parser.add_argument(
+        "--dataset",
+        choices=["L3SFV2Augmented", "PolyU-DBII"],
+        default="L3SFV2Augmented",
+        help="Dataset to evaluate on",
+    )
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Root directory of the dataset. If omitted a sensible default is used.",
+    )
+    args = parser.parse_args()
+
+    if args.data_root is None:
+        data_root = "dataset/PolyU" if args.dataset == "PolyU-DBII" else "dataset/Synthetic"
+    else:
+        data_root = args.data_root
+
+    evaluate(args.dataset, data_root)
