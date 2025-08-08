@@ -26,7 +26,7 @@ from sklearn.metrics import (
 import torch
 from utils.matching import build_matches
 
-from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark
+from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark, PolyUDBIBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
@@ -44,6 +44,13 @@ def evaluate(dataset_name: str, data_root: str):
 
     if dataset_name == "PolyU-DBII":
         benchmark = PolyUDBIIBenchmark(
+            sets="test",
+            obj_resize=(320, 240),
+            train_root=data_root,
+            task="classify",
+        )
+    elif dataset_name == "PolyU-DBI":
+        benchmark = PolyUDBIBenchmark(
             sets="test",
             obj_resize=(320, 240),
             train_root=data_root,
@@ -134,7 +141,7 @@ def evaluate(dataset_name: str, data_root: str):
     far = fp / (fp + tn) if (fp + tn) > 0 else 0.0
     frr = fn / (tp + fn) if (tp + fn) > 0 else 0.0
 
-    out_dir = Path("results/binary-classifier")
+    out_dir = Path(f"results/binary-classifier/{dataset_name}")
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # Visualize one genuine match (label == 1) from the network
@@ -284,7 +291,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the trained binary classifier")
     parser.add_argument(
         "--dataset",
-        choices=["L3SFV2Augmented", "PolyU-DBII"],
+        choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI"],
         default="L3SFV2Augmented",
         help="Dataset to evaluate on",
     )
@@ -296,7 +303,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.data_root is None:
-        data_root = "dataset/PolyU" if args.dataset == "PolyU-DBII" else "dataset/Synthetic"
+        if args.dataset == "PolyU-DBII":
+            data_root = "dataset/PolyU/DBII"
+        elif args.dataset == "PolyU-DBI":
+            data_root = "dataset/PolyU/DBI"
+        else:
+            data_root = "dataset/Synthetic"
     else:
         data_root = args.data_root
 

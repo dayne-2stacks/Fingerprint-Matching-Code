@@ -28,7 +28,7 @@ def detect_pores(start_idx=0, end_idx=50, device='cuda', features=40):
     
     # Configuration
     pathToSolution = 'out_of_the_box_detect/'
-    GROUNDTRUTH = '../dataset/PolyUHRF-FP/DBII'
+    GROUNDTRUTH = '../dataset/PolyUHRF-FP/DBI/Test'
     imageExtension = 'jpg'
     
     # Load model
@@ -75,19 +75,19 @@ def detect_pores(start_idx=0, end_idx=50, device='cuda', features=40):
             
             # Apply NMS and save coordinates
             entireImage.apply_nms(pred, 0.65, 17, 0.2,
-                                  'out_of_the_box_detect/Prediction/PolyU/Pore/',
+                                  'out_of_the_box_detect/Prediction/PolyU-DBI/Pore/',
                                   identifier,
-                                  'out_of_the_box_detect/Prediction/PolyU/Coordinates/',
+                                  'out_of_the_box_detect/Prediction/PolyU-DBI/Coordinates/',
                                   17)
             
             # Read detections for visualization
             detections = []
-            readTxtList(f'out_of_the_box_detect/Prediction/PolyU/Coordinates/{identifier}.txt',
+            readTxtList(f'out_of_the_box_detect/Prediction/PolyU-DBI/Coordinates/{identifier}.txt',
                        detections, image.shape[0], image.shape[1], 17)
             
             # Create and save visualization
             # result_image = draw(image, detections, 5, [0, 0, 255], 1)
-            cv2.imwrite(f'out_of_the_box_detect/Prediction/Fingerprint/{identifier}.png', image)
+            cv2.imwrite(f'out_of_the_box_detect/Prediction/PolyU-DBI/Fingerprint/{identifier}.png', image)
             
             processed_count += 1
             
@@ -97,14 +97,14 @@ def detect_pores(start_idx=0, end_idx=50, device='cuda', features=40):
     
     print(f"\n=== DETECTION COMPLETE ===")
     print(f"✓ Successfully processed: {processed_count} images")
-    print(f"✓ Pore coordinates saved to: out_of_the_box_detect/Prediction/PolyU/Coordinates/")
-    print(f"✓ Visualizations saved to: out_of_the_box_detect/Prediction/PolyU/Fingerprint/")
-    print(f"✓ Binary maps saved to: out_of_the_box_detect/Prediction/PolyU/Pore/")
+    print(f"✓ Pore coordinates saved to: out_of_the_box_detect/Prediction/PolyU-DBI/Coordinates/")
+    print(f"✓ Visualizations saved to: out_of_the_box_detect/Prediction/PolyU-DBI/Fingerprint/")
+    print(f"✓ Binary maps saved to: out_of_the_box_detect/Prediction/PolyU-DBI/Pore/")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Clean Pore Detection for L3-SF Dataset')
     parser.add_argument('--start_index', type=int, default=0, help='Starting image index')
-    parser.add_argument('--end_index', type=int, default=50, help='Ending image index')
+    parser.add_argument('--end_index', type=int, default=2000, help='Ending image index')
     parser.add_argument('--device', type=str, default='cuda', help='Device: cuda or cpu')
     parser.add_argument('--features', type=int, default=40, help='Model features')
     

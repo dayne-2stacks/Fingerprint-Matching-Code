@@ -256,8 +256,9 @@ class L3SFV2AugmentedDataset:
 
 
 class PolyUDBII(L3SFV2AugmentedDataset):
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU',
+    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU/DBII',
                  test_root=None, val_root=None, cache_path='cache', task='match'):
+        self.output_dir = Path("data/PolyU-DBII")
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
     def _get_root_dirs(self, sets, train_root, test_root, val_root):
@@ -321,7 +322,7 @@ class PolyUDBII(L3SFV2AugmentedDataset):
             
             data_dict[unique_id] = anno
         
-        output_dir = Path("data/PolyU-DBII")
+        output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / f"{self.sets}-{self.obj_resize}.json"
         with open(output_file, "w") as f:
@@ -366,7 +367,16 @@ class PolyUDBII(L3SFV2AugmentedDataset):
         }
 
         return anno_dict
-        
+       
+class PolyUDBI(PolyUDBII):
+    """
+    PolyUDBI dataset class, inheriting from PolyUDBII.
+    This class can be used to handle the PolyUDBI dataset with similar functionality.
+    """
+    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU/DBI',
+                 test_root=None, val_root=None, cache_path='cache', task='match'):
+        self.output_dir = Path("data/PolyU-DBI")
+        super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
 # Example usage:
 if __name__ == "__main__":
@@ -375,5 +385,5 @@ if __name__ == "__main__":
         sets='train',
         obj_resize=(320, 240),
     )
-    dic = dataset_train._get_anno_dict(Path("dataset/PolyU/train/DBII_1_1_1.png"))
+    dic = dataset_train._get_anno_dict(Path("dataset/PolyU/DBII/train/DBII_1_1_1.png"))
     print(dic["univ_size"])
