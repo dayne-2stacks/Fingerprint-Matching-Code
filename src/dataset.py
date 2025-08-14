@@ -378,6 +378,120 @@ class PolyUDBI(PolyUDBII):
         self.output_dir = Path("data/PolyU-DBI")
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
+class L3SF(L3SFV2AugmentedDataset):
+    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/L3-SF',
+                 test_root=None, val_root=None, cache_path='cache', task='match'):
+        self.output_dir = Path("data/L3-SF")
+        super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
+        
+    def _get_root_dirs(self, sets, train_root, test_root, val_root):
+        """Return a list of Path objects for image search."""
+        if sets == 'train':
+            return [Path(os.path.join(train_root, "train"))]
+        elif sets == 'test':
+            return [Path(os.path.join(train_root, "test"))]
+        elif sets == 'val':
+            return [Path(os.path.join(train_root, "val"))]
+        else:
+            raise ValueError("sets must be one of 'train', 'test', or 'val'.")
+        
+    def process(self):
+        """
+        Process the images to create a JSON annotation file.
+        
+        The annotation dictionary for each image includes:
+        - "path": full path to the image.
+        - "cls": subject name formed by the folder and file stem joined by an underscore.
+        - "bounds": fixed bounding box [0, 0, 319, 240].
+        - "kpts": list of keypoints (each with "labels", "x", "y").
+        - "univ_size": number of keypoints.
+        """
+            
+        data_dict = {}
+        
+        # PolyUDBII: cls_name is {dbname}_{id} from {dbname}_{id}_{session}_{position}
+        # unique_id is the full stem: {dbname}_{id}_{session}_{position}
+        for img_path in self.image_list:
+            file_stem = img_path.stem  # e.g., DBII_001_01_01
+            parts = file_stem.split('_')
+            if len(parts) >= 2:
+                cls_name = f"{parts[0]}_{parts[1]}"
+            else:
+                cls_name = file_stem  # fallback if unexpected format
+            unique_id = file_stem
+        
+
+            # Retrieve keypoints from the corresponding TSV file.
+            kpts = self._get_keypoints(img_path)
+            
+            with Image.open(str(img_path)) as img:
+                width, height = img.size
+            
+            xmax = min(320, width)
+            ymax = min(240, height)
+            fixed_bounds = [0, 0, xmax, ymax]
+            
+            # Build the annotation dictionary.
+            anno = {
+                "path": str(img_path),
+                "cls": cls_name,
+                "bounds": fixed_bounds,
+                "kpts": kpts,
+                "univ_size": len(kpts)
+            }
+            
+            # Optionally store additional info.
+            anno["obj_resize"] = self.obj_resize
+            
+            data_dict[unique_id] = anno
+        
+        output_dir = Path(self.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"{self.sets}-{self.obj_resize}.json"
+        with open(output_file, "w") as f:
+            json.dump(data_dict, f, indent=4)
+        print(f"Annotation file saved at: {output_file}")
+        
+    def _get_anno_dict(self, img_path: Path):
+        """
+        Create an annotation dictionary for a given image, following the logic of PolyUDBII.process.
+        
+        The class name ("cls") is constructed as {dbname}_{id} from the file stem {dbname}_{id}_{session}_{position}.
+        The unique_id is the full file stem.
+        The bounding box is [0, 0, min(320, width), min(240, height)].
+        """
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image file {img_path} does not exist.")
+
+        file_stem = img_path.stem  # e.g., DBII_001_01_01
+        parts = file_stem.split('_')
+        if len(parts) >= 2:
+            cls_name = f"{parts[0]}_{parts[1]}"
+        else:
+            cls_name = file_stem  # fallback if unexpected format
+        unique_id = file_stem
+
+        with Image.open(str(img_path)) as img:
+            width, height = img.size
+
+        xmax = min(320, width)
+        ymax = min(240, height)
+        bounds = [0, 0, xmax, ymax]
+
+        keypoints = self._get_keypoints(img_path)
+
+        anno_dict = {
+            "path": str(img_path),
+            "cls": cls_name,
+            "bounds": bounds,
+            "kpts": keypoints,
+            "univ_size": len(keypoints),
+            "obj_resize": self.obj_resize
+        }
+
+        return anno_dict
+       
+        
 # Example usage:
 if __name__ == "__main__":
     # For training, images (and their corresponding csv files) are assumed to be in /green/data/L3SF in folders R1–R5.

@@ -56,18 +56,41 @@ if __name__ == "__main__":
         parts = fname.split('_')
         if len(parts) < 2:
             continue  # skip malformed names
-        person = parts[1]
+        db_name = parts[0]  # e.g., 'PolyU'
+        if db_name != 'PolyU':
+            person = db_name + '_' + parts[1]
+        else:
+            person = parts[1]
         person_to_images[person].append(fname)
 
-    # Shuffle persons and split into train/val/test
     persons = list(person_to_images.keys())
-    random.shuffle(persons)
-    n = len(persons)
-    n_train = int(n * 0.6)
-    n_val = int(n * 0.2)
-    train_persons = persons[:n_train]
-    val_persons = persons[n_train:n_train + n_val]
-    test_persons = persons[n_train + n_val:]
+    if db_name != 'PolyU':
+        # For R1-R5 databases, create specific splits based on DB prefix
+        train_persons = [p for p in persons if any(p.startswith(prefix) for prefix in ['R1_', 'R2_', 'R3_'])]
+        val_persons = [p for p in persons if p.startswith('R5_')]
+        test_persons = [p for p in persons if p.startswith('R4_')]
+        other_persons = [p for p in persons if p not in train_persons + val_persons + test_persons]
+
+        # Randomly split the remaining persons
+        random.shuffle(other_persons)
+        n_other = len(other_persons)
+        n_train_other = int(n_other * 0.6)
+        n_val_other = int(n_other * 0.2)
+
+        train_persons.extend(other_persons[:n_train_other])
+        val_persons.extend(other_persons[n_train_other:n_train_other + n_val_other])
+        test_persons.extend(other_persons[n_train_other + n_val_other:])
+
+    else:
+        # Shuffle persons and split into train/val/test
+        
+        random.shuffle(persons)
+        n = len(persons)
+        n_train = int(n * 0.6)
+        n_val = int(n * 0.2)
+        train_persons = persons[:n_train]
+        val_persons = persons[n_train:n_train + n_val]
+        test_persons = persons[n_train + n_val:]
 
     splits = {
         'train': train_persons,

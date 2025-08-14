@@ -418,26 +418,30 @@ class TestDataset(GMDataset):
             if pair[0] != pair[1]:
                 img_path1 = self.bm.get_path(pair[0])
                 img_path2 = self.bm.get_path(pair[1])
-                
+
+
                 img1_orig = cv2.imread(img_path1)
                 img2_orig = cv2.imread(img_path2)
                 annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
                 annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
                 if self.augment:
-                    img1, annos1 = augment_image(img1_orig, annos1_base)
-                    img2, annos2 = augment_image(img2_orig, annos2_base)
+                    img1, annos1_filtered = augment_image(img1_orig, annos1_base)
+                    img2, annos2_filtered = augment_image(img2_orig, annos2_base)
                 else:
-                    img1, annos1 = _standardize(img1_orig, annos1_base)
-                    img2, annos2 = _standardize(img2_orig, annos2_base)
+                    img1, annos1_filtered = _standardize(img1_orig, annos1_base)
+                    img2, annos2_filtered = _standardize(img2_orig, annos2_base)
 
-                labels1 = {a[0] for a in annos1}
-                labels2 = {a[0] for a in annos2}
-                common_labels = sorted(labels1.intersection(labels2))
-                annos1_filtered = [next(a for a in annos1 if a[0] == lbl) for lbl in common_labels]
-                annos2_filtered = [next(a for a in annos2 if a[0] == lbl) for lbl in common_labels]
-                n_common = len(common_labels)
-                perm_mat = np.eye(n_common, dtype=np.float32)
+                if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
+                    return self.get_pair_classify((idx + 1) % self.length)
+
+                if len(annos1_filtered) > UNIV_SIZE:
+                    annos1_filtered = annos1_filtered[:UNIV_SIZE]
+                if len(annos2_filtered) > UNIV_SIZE:
+                    annos2_filtered = annos2_filtered[:UNIV_SIZE]
+
+                perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
+                n_common = 0
             else:
                 img_path = self.bm.get_path(pair[0])
                 original_img = cv2.imread(img_path)
@@ -459,6 +463,14 @@ class TestDataset(GMDataset):
                     img2, annos2_filtered = _standardize(original_img, original_annos)
                     n_common = len(annos1_filtered)
 
+                if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
+                    return self.get_pair_classify((idx + 1) % self.length)
+
+                if len(annos1_filtered) > UNIV_SIZE:
+                    annos1_filtered = annos1_filtered[:UNIV_SIZE]
+                    annos2_filtered = annos2_filtered[:UNIV_SIZE]
+                n_common = len(annos1_filtered)
+
                 perm_mat = np.eye(n_common, dtype=np.float32)
 
         else:
@@ -475,6 +487,14 @@ class TestDataset(GMDataset):
             else:
                 img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                 img2, annos2_filtered = _standardize(img2_orig, annos2_base)
+
+            if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
+                return self.get_pair_classify((idx + 1) % self.length)
+
+            if len(annos1_filtered) > UNIV_SIZE:
+                annos1_filtered = annos1_filtered[:UNIV_SIZE]
+            if len(annos2_filtered) > UNIV_SIZE:
+                annos2_filtered = annos2_filtered[:UNIV_SIZE]
 
             perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
             n_common = 0

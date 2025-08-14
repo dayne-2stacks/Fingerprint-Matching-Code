@@ -26,8 +26,8 @@ from sklearn.metrics import (
 import torch
 from utils.matching import build_matches
 
-from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark, PolyUDBIBenchmark
-from src.gmdataset import GMDataset, get_dataloader
+from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark, PolyUDBIBenchmark, L3SFBenchmark
+from src.gmdataset import GMDataset, get_dataloader, TestDataset
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import load_model
@@ -56,6 +56,14 @@ def evaluate(dataset_name: str, data_root: str):
             train_root=data_root,
             task="classify",
         )
+    elif dataset_name == "L3-SF":
+        benchmark = L3SFBenchmark(
+            sets="test",
+            obj_resize=(320, 240),
+            train_root=data_root,
+            task="classify",
+        )
+        
     else:
         benchmark = L3SFV2AugmentedBenchmark(
             sets="test",
@@ -65,8 +73,8 @@ def evaluate(dataset_name: str, data_root: str):
         )
         dataset_name = "L3SFV2Augmented"
 
-    dataset = GMDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
-    dataloader = get_dataloader(dataset, shuffle=False, fix_seed=True)
+    dataset = TestDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
+    dataloader = get_dataloader(dataset, shuffle=True, fix_seed=True)
 
     match_net = Net(regression=True)
 
@@ -291,8 +299,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the trained binary classifier")
     parser.add_argument(
         "--dataset",
-        choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI"],
-        default="L3SFV2Augmented",
+        choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI", "L3-SF"],
+        default="L3-SF",
         help="Dataset to evaluate on",
     )
     parser.add_argument(
@@ -307,6 +315,8 @@ if __name__ == "__main__":
             data_root = "dataset/PolyU/DBII"
         elif args.dataset == "PolyU-DBI":
             data_root = "dataset/PolyU/DBI"
+        elif args.dataset == "L3-SF":
+            data_root = "dataset/L3-SF"
         else:
             data_root = "dataset/Synthetic"
     else:
