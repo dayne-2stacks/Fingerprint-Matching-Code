@@ -18,7 +18,7 @@ from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
 from src.loss_func import PermutationLoss
-from utils.models_sl import save_model, load_model
+from utils.models_sl import save_model, load_model, load_optimizer
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 from src.evaluation_metric import matching_accuracy
 from utils.scheduler import WarmupScheduler
@@ -256,17 +256,11 @@ for file in config_files:
         load_model(model, model_path)
     if len(optim_path) > 0:
         print("Loading optimizer state from {}".format(optim_path))
-        try:
-            optimizer.load_state_dict(torch.load(optim_path))
-        except (FileNotFoundError, ValueError) as e:
-            print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
+        load_optimizer(optimizer, optim_path)
 
     if len(optim_k_path) > 0:
-        try:
-            print("Loading optimizer_k state from {}".format(optim_k_path))
-            optimizer_k.load_state_dict(torch.load(optim_k_path))
-        except (FileNotFoundError, ValueError) as e:
-            print(f"Could not load optimizer_k state: {e}. Starting fresh for k_params.")
+        print("Loading optimizer_k state from {}".format(optim_k_path))
+        load_optimizer(optimizer_k, optim_k_path)
     PRETRAINED_PATH = ""  # Clear after loading to avoid reloading in next stages
     # Initialize warmup scheduler learning rates after loading optimizer state
     # if start_epoch == 0:  # Only for fresh training, not resuming

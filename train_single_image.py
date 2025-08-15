@@ -6,7 +6,7 @@ from src.parallel import DataParallel
 import torch
 from src.loss_func import PermutationLoss
 import torch.optim as optim
-from utils.models_sl import save_model, load_model
+from utils.models_sl import save_model, load_model, load_optimizer
 from utils.matching import build_matches
 
 from pathlib import Path
@@ -73,7 +73,7 @@ if len(model_path) > 0:
     load_model(model, model_path, strict=False)
 if len(optim_path) > 0:
     print('Loading optimizer state from {}'.format(optim_path))
-    optimizer.load_state_dict(torch.load(optim_path))
+    load_optimizer(optimizer, optim_path)
 
 scheduler = optim.lr_scheduler.MultiStepLR(
     optimizer,

@@ -38,3 +38,33 @@ def load_model(model, path, strict=False):
             'Warning: Missing key(s) in state_dict: {}. '.format(
                 ', '.join('"{}"'.format(k) for k in missing_keys))
         )
+
+
+def load_optimizer(optimizer, path):
+    """Load an optimizer state dict, skipping if param groups mismatch.
+
+    This handles cases where the optimizer was saved for a model with
+    different parameter groups (e.g. new layers added). If the file cannot be
+    loaded or the group counts differ, the optimizer is left in its freshly
+    initialized state.
+    """
+    try:
+        state = torch.load(path, map_location="cpu")
+    except FileNotFoundError as e:
+        print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
+        return
+
+    # If the number of parameter groups doesn't match, skip loading
+    saved_groups = len(state.get("param_groups", []))
+    current_groups = len(optimizer.param_groups)
+    if saved_groups != current_groups:
+        print(
+            "Could not load optimizer state: loaded state dict has a different number of parameter groups. "
+            "Starting with fresh optimizer."
+        )
+        return
+
+    try:
+        optimizer.load_state_dict(state)
+    except ValueError as e:
+        print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
