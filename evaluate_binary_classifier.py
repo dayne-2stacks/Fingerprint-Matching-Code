@@ -65,15 +65,16 @@ def evaluate(dataset_name: str, data_root: str):
         )
         
     else:
+        dataset_name = "L3SFV2Augmented"
         benchmark = L3SFV2AugmentedBenchmark(
             sets="test",
             obj_resize=(320, 240),
             train_root=data_root,
             task="classify",
+            name =dataset_name,
         )
-        dataset_name = "L3SFV2Augmented"
 
-    dataset = TestDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
+    dataset = GMDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
     dataloader = get_dataloader(dataset, shuffle=True, fix_seed=True)
 
     match_net = Net(regression=True)
@@ -90,6 +91,7 @@ def evaluate(dataset_name: str, data_root: str):
 
     all_labels = []
     all_probs = []
+    all_raw_k = []  # Add this line to store raw k values
     iteration = 0
     with torch.no_grad():
         for batch in dataloader:
@@ -104,6 +106,7 @@ def evaluate(dataset_name: str, data_root: str):
             prob = (k_pred / min_points).clamp(0, 1)
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
+            all_raw_k.append(k_pred.cpu())  # Add this line to store raw k values
             if iteration % 5 == 0:
                 print(f"Processed {iteration} batches...")
                 
@@ -277,6 +280,50 @@ def evaluate(dataset_name: str, data_root: str):
     plt.savefig(out_dir / "pr_curve.png", bbox_inches="tight", pad_inches=0)
     plt.close()
 
+    # Concatenate raw k values
+    all_raw_k = torch.cat(all_raw_k).numpy()
+
+    # Histogram of normalized k values
+    plt.figure(figsize=(10, 6))
+    genuine_probs = all_probs[all_labels == 1]
+    imposter_probs = all_probs[all_labels == 0]
+
+    # Use bins that cover the range from 0 to 1
+    bins = np.linspace(0, 1, 30)
+
+    plt.hist(imposter_probs, bins=bins, alpha=0.5, label='Imposter Matches', color='red')
+    plt.hist(genuine_probs, bins=bins, alpha=0.5, label='Genuine Matches', color='green')
+
+    plt.xlabel('Normalized k Value (k_pred/min_points)')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Normalized k Values')
+    plt.grid(alpha=0.3)
+    plt.axvline(x=eer_threshold, color='black', linestyle='--', 
+               label=f'EER Threshold ({eer_threshold:.3f})')
+    plt.legend()
+    plt.savefig(out_dir / "normalized_k_histogram.png", bbox_inches="tight", pad_inches=0)
+    plt.close()
+
+    # Histogram of raw k values
+    plt.figure(figsize=(10, 6))
+    genuine_raw_k = all_raw_k[all_labels == 1]
+    imposter_raw_k = all_raw_k[all_labels == 0]
+
+    # Find appropriate bin range for raw k values
+    max_k = np.max(all_raw_k) * 1.05  # Add a small margin
+    bins = np.linspace(0, max_k, 30)
+
+    plt.hist(imposter_raw_k, bins=bins, alpha=0.5, label='Imposter Matches', color='red')
+    plt.hist(genuine_raw_k, bins=bins, alpha=0.5, label='Genuine Matches', color='green')
+
+    plt.xlabel('Raw k Value (Number of Matched Keypoints)')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Raw k Values')
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.savefig(out_dir / "raw_k_histogram.png", bbox_inches="tight", pad_inches=0)
+    plt.close()
+
     metrics = {
         "accuracy": accuracy,
         "precision": precision,
@@ -300,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI", "L3-SF"],
-        default="L3-SF",
+        default="L3SFV2Augmented",
         help="Dataset to evaluate on",
     )
     parser.add_argument(
