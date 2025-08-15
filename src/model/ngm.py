@@ -72,6 +72,36 @@ def concat_features(embeddings, num_vertices):
     return res.transpose(0, 1)
 
 
+class MatchClassifier(nn.Module):
+    """Classifier to determine genuine vs. imposter pairs.
+
+    Inspired by recent verification networks that leverage richer statistics
+    of correspondence similarities, the classifier consumes a vector of
+    aggregate match features (e.g., match ratio, mean/max/std similarity) and
+    processes them with a deeper MLP equipped with batch normalisation and
+    dropout for improved generalisation.
+    """
+
+    def __init__(self, in_dim: int = 4, hidden_dims: tuple = (32, 16)):
+        super().__init__()
+        layers = []
+        prev_dim = in_dim
+        for h in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, h),
+                nn.ReLU(),
+                nn.BatchNorm1d(h),
+                nn.Dropout(0.2),
+            ])
+            prev_dim = h
+        layers.append(nn.Linear(prev_dim, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, feats: torch.Tensor) -> torch.Tensor:
+        """Compute logits from aggregated match features."""
+        return self.net(feats).squeeze(-1)
+
+
 # CNN is the VGG16 feature extractor with final fully connected layers
 
 # Contains methods {
@@ -164,8 +194,8 @@ class Net(CNN):
         {'params': self.final_col.parameters()}
         ]
 
-        # Binary match classifier using aggregated similarity scores
-        # self.match_cls = MatchClassifier()
+        # Binary match classifier leveraging richer similarity statistics
+        self.match_cls = MatchClassifier()
  
     
     def forward(self, data_dict, regression=True):
@@ -381,47 +411,71 @@ class Net(CNN):
         else:
             ks = gt_ks / min_point_tensor
 
-        cls_loss = torch.tensor(0.0, device=s.device)
-        # In classification mode, adjust ground truth k based on label
-        if 'label' in data_dict:
-            label_tensor = data_dict['label'].to(s.device).view(-1).float()
-            pred_val = ks.detach() * min_point_tensor
-            gt_ks = torch.where(label_tensor == 1, pred_val,
-                               torch.zeros_like(pred_val))
-            cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                k_logits, label_tensor)
-            
         if self.training:
             # print("Training mode, using ground truth ks")
-            _, ss_out = soft_topk(ss, gt_ks.view(-1), SK_ITER_NUM, self.tau, n_points[idx1], n_points[idx2],
-                                True)
+            _, ss_out = soft_topk(
+                ss,
+                gt_ks.view(-1),
+                SK_ITER_NUM,
+                self.tau,
+                n_points[idx1],
+                n_points[idx2],
+                True,
+            )
         else:
             # print("Inference mode, using predicted ks")
-            _, ss_out = soft_topk(ss, ks.view(-1) * min_point_tensor, SK_ITER_NUM, self.tau, n_points[idx1],
-                                    n_points[idx2], True)
+            _, ss_out = soft_topk(
+                ss,
+                ks.view(-1) * min_point_tensor,
+                SK_ITER_NUM,
+                self.tau,
+                n_points[idx1],
+                n_points[idx2],
+                True,
+            )
 
         supervised_ks = gt_ks / min_point_tensor
-        # print("predicted ks:", ks[0] * min_point_tensor)
-        # print("Groundtruth:", gt_ks[0])
-        # print("Supervised", supervised_ks)
+
+        # Construct hard permutation and filter similarity scores to predicted matches
+        x = hungarian(ss_out, n_points[idx1], n_points[idx2])
+        top_indices = torch.argsort(
+            x.mul(ss_out).reshape(x.shape[0], -1), descending=True, dim=-1
+        )
+        x = torch.zeros(ss_out.shape, device=ss_out.device)
+        x = greedy_perm(x, top_indices, ks.view(-1) * min_point_tensor)
+
+        matched_sim = s * x
+        num_matches = x.sum(dim=(1, 2))
+        avg_sim = matched_sim.sum(dim=(1, 2)) / (num_matches + 1e-8)
+        max_sim = matched_sim.view(matched_sim.shape[0], -1).max(dim=1).values
+        std_sim = torch.sqrt(
+            ((matched_sim - avg_sim.view(-1, 1, 1)) ** 2).sum(dim=(1, 2))
+            / (num_matches + 1e-8)
+        )
+
+        feats = torch.stack([ks, avg_sim, max_sim, std_sim], dim=1)
+
+        # Binary classification of genuine vs. imposter
+        cls_logits = self.match_cls(feats)
+        cls_prob = torch.sigmoid(cls_logits)
+
+        cls_loss = torch.tensor(0.0, device=s.device)
+        if 'label' in data_dict:
+            label_tensor = data_dict['label'].to(s.device).view(-1).float()
+            cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                cls_logits, label_tensor
+            )
 
         if self.regression:
             ks_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
             ks_error = torch.nn.functional.l1_loss(ks * min_point_tensor, gt_ks)
         else:
-            ks_loss = 0.
-            ks_error = 0.
-        
-        x = hungarian(ss_out, n_points[idx1], n_points[idx2])
-        top_indices = torch.argsort(x.mul(ss_out).reshape(x.shape[0], -1), descending=True, dim=-1)
-        x = torch.zeros(ss_out.shape, device=ss_out.device)
-        x = greedy_perm(x, top_indices, ks.view(-1) * min_point_tensor)
+            ks_loss = 0.0
+            ks_error = 0.0
+
         s_list.append(ss_out)
         x_list.append(x)
         indices.append((idx1, idx2))
-
-        # Compute match probability using original similarity scores
-        # match_prob = self.match_cls(s, x)
         
         # print(x)
         # print(ss_out)
@@ -433,8 +487,8 @@ class Net(CNN):
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
                 'cls_loss': cls_loss,
-                'cls_prob': ks,
-                # 'match_prob': match_prob
+                'cls_prob': cls_prob,
+                'k_prob': ks,
             })
         
         # print("Match probability:", match_prob[0].item())
