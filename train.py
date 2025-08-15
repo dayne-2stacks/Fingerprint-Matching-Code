@@ -122,7 +122,7 @@ for file in config_files:
     # =====================================================
     # Dataset and Dataloader
     # =====================================================
-    task = 'classify' if stage == 4 else 'match'
+    task = 'classify' if stage in (4, 5) else 'match'
     dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len, task=task)
     # =====================================================
     # Model, Loss, and Device Setup
@@ -149,6 +149,7 @@ for file in config_files:
         {'params': other_params},
         {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
+    match_cls_ids = [id(p) for p in model.match_cls.parameters()]
     if stage == 1:
         
         print("Stage 1: Freezing all layers in k_params and training other parameters.")
@@ -202,12 +203,12 @@ for file in config_files:
         optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
     elif stage == 5:
-        print("Stage 5: Joint training of matching and k modules.")
+        print("Stage 5: Training match classifier only.")
         for name, param in model.named_parameters():
-            param.requires_grad = True
-        K_Optimize = True
-        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
+            param.requires_grad = id(param) in match_cls_ids
+        K_Optimize = False
+        optimizer = optim.AdamW(model.match_cls.parameters(), lr=LR, weight_decay=1e-4)
+        optimizer_k = None
     else:
         optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
