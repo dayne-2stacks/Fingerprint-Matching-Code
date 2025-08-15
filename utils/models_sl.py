@@ -23,12 +23,18 @@ def load_model(model, path, strict=False):
         if k in model_dict and v.shape == model_dict[k].shape:
             filtered_dict[k] = v
         else:
-            print(f"Skipping loading parameter: {k} due to shape mismatch ({v.shape} vs {model_dict.get(k, None).shape if k in model_dict else 'N/A'})")
+            print(
+                f"Skipping loading parameter: {k} due to shape mismatch ({v.shape} vs {model_dict.get(k, None).shape if k in model_dict else 'N/A'})"
+            )
 
-    missing_keys, unexpected_keys = module.load_state_dict(filtered_dict, strict=False)
+    missing_keys, unexpected_keys = module.load_state_dict(filtered_dict, strict=strict)
     if len(unexpected_keys) > 0:
-        print('Warning: Unexpected key(s) in state_dict: {}. '.format(
-            ', '.join('"{}"'.format(k) for k in unexpected_keys)))
+        print(
+            'Warning: Unexpected key(s) in state_dict: {}. '.format(
+                ', '.join('"{}"'.format(k) for k in unexpected_keys))
+        )
     if len(missing_keys) > 0:
-        print('Warning: Missing key(s) in state_dict: {}. '.format(
-            ', '.join('"{}"'.format(k) for k in missing_keys)))
+        print(
+            'Warning: Missing key(s) in state_dict: {}. '.format(
+                ', '.join('"{}"'.format(k) for k in missing_keys))
+        )

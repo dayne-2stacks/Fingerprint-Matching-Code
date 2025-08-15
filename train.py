@@ -256,13 +256,17 @@ for file in config_files:
         load_model(model, model_path)
     if len(optim_path) > 0:
         print("Loading optimizer state from {}".format(optim_path))
-        optimizer.load_state_dict(torch.load(optim_path))
+        try:
+            optimizer.load_state_dict(torch.load(optim_path))
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
+
     if len(optim_k_path) > 0:
         try:
             print("Loading optimizer_k state from {}".format(optim_k_path))
             optimizer_k.load_state_dict(torch.load(optim_k_path))
-        except FileNotFoundError:
-            print("No optimizer_k checkpoint found; starting fresh for k_params.")
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Could not load optimizer_k state: {e}. Starting fresh for k_params.")
     PRETRAINED_PATH = ""  # Clear after loading to avoid reloading in next stages
     # Initialize warmup scheduler learning rates after loading optimizer state
     # if start_epoch == 0:  # Only for fresh training, not resuming
