@@ -447,9 +447,9 @@ class Net(CNN):
         matched_sim = s * x
         num_matches = x.sum(dim=(1, 2))
         avg_sim = matched_sim.sum(dim=(1, 2)) / (num_matches + 1e-8)
-        max_sim = matched_sim.view(matched_sim.shape[0], -1).max(dim=1).values
+        max_sim = matched_sim.reshape(matched_sim.shape[0], -1).max(dim=1).values
         std_sim = torch.sqrt(
-            ((matched_sim - avg_sim.view(-1, 1, 1)) ** 2).sum(dim=(1, 2))
+            ((matched_sim - avg_sim[:, None, None]) ** 2).sum(dim=(1, 2))
             / (num_matches + 1e-8)
         )
 
