@@ -63,7 +63,7 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
     print(log_msg)
     logger.info(log_msg)
 
-    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
+    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, avg_cls_loss
 
 
 def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None):

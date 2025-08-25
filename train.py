@@ -144,12 +144,15 @@ for file in config_files:
     # In stage 3, we use the original parameter grouping.
     backbone_ids = [id(item) for item in model.backbone_params]
     k_params = model.k_params_id
-    other_params = [param for param in model.parameters() if id(param) not in k_params and id(param) not in backbone_ids]
+    match_cls_ids = [id(p) for p in model.match_cls.parameters()]
+    other_params = [param for param in model.parameters()
+                    if id(param) not in k_params
+                    and id(param) not in backbone_ids
+                    and id(param) not in match_cls_ids]
     model_params = [
         {'params': other_params},
         {'params': model.backbone_params, 'lr': BACKBONE_LR}
         ]
-    match_cls_ids = [id(p) for p in model.match_cls.parameters()]
     if stage == 1:
         
         print("Stage 1: Freezing all layers in k_params and training other parameters.")
@@ -207,11 +210,13 @@ for file in config_files:
         for name, param in model.named_parameters():
             param.requires_grad = id(param) in match_cls_ids
         K_Optimize = False
-        optimizer = optim.AdamW(model.match_cls.parameters(), lr=LR, weight_decay=1e-4)
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = None
     else:
         optimizer = optim.AdamW(model.parameters(), lr=LR)
         optimizer_k = None
+
+    optimizer_cls = optim.AdamW(model.match_cls.parameters(), lr=LR, weight_decay=1e-4)
 
     # =====================================================
     # Schedulers for Both Optimizers
@@ -225,11 +230,9 @@ for file in config_files:
                                             #    last_epoch=-1)
     main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=LR_DECAY)
     scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
+    main_scheduler_cls = optim.lr_scheduler.ReduceLROnPlateau(optimizer_cls, patience=2, factor=LR_DECAY)
+    scheduler_cls = WarmupScheduler(optimizer_cls, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler_cls)
     if optimizer_k is not None:
-        # main_scheduler_k = optim.lr_scheduler.MultiStepLR(optimizer_k,
-        #                                               milestones=milestones,
-        #                                               gamma=LR_DECAY,
-        #                                               last_epoch=-1)
         main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=1, factor=LR_DECAY)
         scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=2, after_scheduler=main_scheduler_k)
 
@@ -242,11 +245,13 @@ for file in config_files:
     model_path = ""
     optim_path = ""
     optim_k_path = ""
+    optim_cls_path = ""
     if start_epoch != 0:
         model_path = str(checkpoint_path / f'params_{start_epoch:04}.pt')
         optim_path = str(checkpoint_path / f'optim_{start_epoch:04}.pt')
         if optimizer_k is not None:
             optim_k_path = str(checkpoint_path / f'optim_k_{start_epoch:04}.pt')
+        optim_cls_path = str(checkpoint_path / f'optim_cls_{start_epoch:04}.pt')
 
     if len(PRETRAINED_PATH) > 0:
         model_path = PRETRAINED_PATH
@@ -261,6 +266,9 @@ for file in config_files:
     if len(optim_k_path) > 0:
         print("Loading optimizer_k state from {}".format(optim_k_path))
         load_optimizer(optimizer_k, optim_k_path)
+    if len(optim_cls_path) > 0:
+        print("Loading optimizer_cls state from {}".format(optim_cls_path))
+        load_optimizer(optimizer_cls, optim_cls_path)
     PRETRAINED_PATH = ""  # Clear after loading to avoid reloading in next stages
     # Initialize warmup scheduler learning rates after loading optimizer state
     # if start_epoch == 0:  # Only for fresh training, not resuming
@@ -279,6 +287,11 @@ for file in config_files:
         initial_k_lr = scheduler_k.get_initial_lr() if hasattr(scheduler_k, 'get_initial_lr') else K_LR / warmup_epochs
         for param_group in optimizer_k.param_groups:
             param_group['lr'] = initial_k_lr
+
+    if scheduler_cls is not None:
+        initial_cls_lr = scheduler_cls.get_initial_lr() if hasattr(scheduler_cls, 'get_initial_lr') else LR / warmup_epochs
+        for param_group in optimizer_cls.param_groups:
+            param_group['lr'] = initial_cls_lr
             
     
     # best_model_path = str(checkpoint_path / "best_model.pt")
@@ -301,6 +314,7 @@ for file in config_files:
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
         if optimizer_k is not None:
             print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))
+        print("Cls_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_cls.param_groups]))
 
         for i, param_group in enumerate(optimizer.param_groups):
             writer.add_scalar(f'Learning_Rate/group_{i}', param_group['lr'], epoch)
@@ -309,12 +323,16 @@ for file in config_files:
             for i, param_group in enumerate(optimizer_k.param_groups):
                 writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
 
-        avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy = train_epoch(
+        for i, param_group in enumerate(optimizer_cls.param_groups):
+            writer.add_scalar(f'Learning_Rate_Cls/group_{i}', param_group['lr'], epoch)
+
+        avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy, avg_cls_loss = train_epoch(
             model,
             dataloader,
             criterion,
             optimizer,
             optimizer_k,
+            optimizer_cls,
             device,
             writer,
             epoch,
@@ -327,7 +345,7 @@ for file in config_files:
         # =====================================================
         # ---- Validation after each epoch ----
         # =====================================================
-        avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy = validate_epoch(
+        avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, avg_val_cls_loss = validate_epoch(
             model,
             val_dataloader,
             criterion,
@@ -365,6 +383,7 @@ for file in config_files:
         scheduler.step(avg_val_loss)
         if optimizer_k is not None:
             scheduler_k.step(avg_ks_loss)
+        scheduler_cls.step(avg_val_cls_loss)
 
         # Detect LR reduction for main optimizer
         curr_lr = [group['lr'] for group in optimizer.param_groups]
