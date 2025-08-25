@@ -75,31 +75,35 @@ def concat_features(embeddings, num_vertices):
 class MatchClassifier(nn.Module):
     """Classifier to determine genuine vs. imposter pairs.
 
-    Inspired by recent verification networks that leverage richer statistics
-    of correspondence similarities, the classifier consumes a vector of
-    aggregate match features (e.g., match ratio, mean/max/std similarity) and
-    processes them with a deeper MLP equipped with batch normalisation and
-    dropout for improved generalisation.
+    Rather than relying on a handful of handcrafted statistics, this
+    classifier consumes the full assignment/similarity matrix.  A small CNN
+    encodes spatial correlations in the match map and the resulting embedding
+    is collapsed via global pooling before a final linear layer predicts the
+    genuine/imposter logit.
     """
 
-    def __init__(self, in_dim: int = 4, hidden_dims: tuple = (32, 16)):
+    def __init__(self, channels: tuple = (16, 32)):
         super().__init__()
-        layers = []
-        prev_dim = in_dim
-        for h in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, h),
+        convs = []
+        in_ch = 1
+        for ch in channels:
+            convs.extend([
+                nn.Conv2d(in_ch, ch, kernel_size=3, padding=1),
                 nn.ReLU(),
-                nn.BatchNorm1d(h),
-                nn.Dropout(0.2),
+                nn.BatchNorm2d(ch),
+                nn.MaxPool2d(2),
             ])
-            prev_dim = h
-        layers.append(nn.Linear(prev_dim, 1))
-        self.net = nn.Sequential(*layers)
+            in_ch = ch
+        self.conv = nn.Sequential(*convs)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(in_ch, 1)
 
-    def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        """Compute logits from aggregated match features."""
-        return self.net(feats).squeeze(-1)
+    def forward(self, match_mat: torch.Tensor) -> torch.Tensor:
+        """Compute logits from the assignment/similarity matrix."""
+        x = match_mat.unsqueeze(1)
+        x = self.conv(x)
+        x = self.pool(x).view(x.size(0), -1)
+        return self.fc(x).squeeze(-1)
 
 
 # CNN is the VGG16 feature extractor with final fully connected layers
@@ -445,18 +449,9 @@ class Net(CNN):
         x = greedy_perm(x, top_indices, ks.view(-1) * min_point_tensor)
 
         matched_sim = s * x
-        num_matches = x.sum(dim=(1, 2))
-        avg_sim = matched_sim.sum(dim=(1, 2)) / (num_matches + 1e-8)
-        max_sim = matched_sim.reshape(matched_sim.shape[0], -1).max(dim=1).values
-        std_sim = torch.sqrt(
-            ((matched_sim - avg_sim[:, None, None]) ** 2).sum(dim=(1, 2))
-            / (num_matches + 1e-8)
-        )
 
-        feats = torch.stack([ks, avg_sim, max_sim, std_sim], dim=1)
-
-        # Binary classification of genuine vs. imposter
-        cls_logits = self.match_cls(feats)
+        # Binary classification of genuine vs. imposter using full match matrix
+        cls_logits = self.match_cls(matched_sim)
         cls_prob = torch.sigmoid(cls_logits)
 
         cls_loss = torch.tensor(0.0, device=s.device)
