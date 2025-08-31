@@ -9,7 +9,7 @@ from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
-from utils.augmentation import augment_image
+from utils.augmentation import augment_image, augment_image_pair, augment_two_images
 from itertools import combinations
 from src.model.ngm import UNIV_SIZE
 
@@ -154,17 +154,11 @@ class GMDataset(Dataset):
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
         if self.augment:
-            n_common = 0
-            while n_common <= 3:
-                img1, annos1 = augment_image(original_img, original_annos)
-                img2, annos2 = augment_image(original_img, original_annos)
-                labels1 = set(a[0] for a in annos1)
-                labels2 = set(a[0] for a in annos2)
-                common_labels = labels1.intersection(labels2)
-                n_common = len(common_labels)
-
-            annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-            annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+            # Parallel, realistic pair augmentation with shared label filtering
+            (img1, annos1_filtered), (img2, annos2_filtered) = augment_image_pair(
+                original_img, original_annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
+            )
+            n_common = min(len(annos1_filtered), len(annos2_filtered))
             perm_mat = np.eye(n_common, dtype=np.float32)
         else:
             img1, annos1 = _standardize(original_img, original_annos)
@@ -293,16 +287,11 @@ class GMDataset(Dataset):
             original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
 
             if self.augment:
-                n_common = 0
-                while n_common <= 3:
-                    img1, annos1 = augment_image(original_img, original_annos)
-                    img2, annos2 = augment_image(original_img, original_annos)
-                    labels1 = set(a[0] for a in annos1)
-                    labels2 = set(a[0] for a in annos2)
-                    common_labels = labels1.intersection(labels2)
-                    n_common = len(common_labels)
-                annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-                annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+                # Parallel augmentation for genuine pair; enforce shared labels
+                (img1, annos1_filtered), (img2, annos2_filtered) = augment_image_pair(
+                    original_img, original_annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
+                )
+                n_common = min(len(annos1_filtered), len(annos2_filtered))
             else:
                 img1, annos1_filtered = _standardize(original_img, original_annos)
                 img2, annos2_filtered = _standardize(original_img, original_annos)
@@ -326,8 +315,10 @@ class GMDataset(Dataset):
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
             if self.augment:
-                img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+                # Parallel augmentation for imposter pair (different images)
+                (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
+                    img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
+                )
             else:
                 img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                 img2, annos2_filtered = _standardize(img2_orig, annos2_base)
@@ -426,8 +417,9 @@ class TestDataset(GMDataset):
                 annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
                 if self.augment:
-                    img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                    img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
+                        img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
+                    )
                 else:
                     img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                     img2, annos2_filtered = _standardize(img2_orig, annos2_base)
@@ -448,16 +440,10 @@ class TestDataset(GMDataset):
                 original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
 
                 if self.augment:
-                    n_common = 0
-                    while n_common <= 3:
-                        img1, annos1 = augment_image(original_img, original_annos)
-                        img2, annos2 = augment_image(original_img, original_annos)
-                        labels1 = set(a[0] for a in annos1)
-                        labels2 = set(a[0] for a in annos2)
-                        common_labels = labels1.intersection(labels2)
-                        n_common = len(common_labels)
-                    annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-                    annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_image_pair(
+                        original_img, original_annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
+                    )
+                    n_common = min(len(annos1_filtered), len(annos2_filtered))
                 else:
                     img1, annos1_filtered = _standardize(original_img, original_annos)
                     img2, annos2_filtered = _standardize(original_img, original_annos)
@@ -482,8 +468,9 @@ class TestDataset(GMDataset):
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
             if self.augment:
-                img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+                (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
+                    img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
+                )
             else:
                 img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                 img2, annos2_filtered = _standardize(img2_orig, annos2_base)

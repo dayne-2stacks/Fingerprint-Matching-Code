@@ -56,6 +56,9 @@ class L3SFV2AugmentedDataset:
         if not hasattr(self, "output_dir"):
             self.output_dir = Path("data/L3SFV2AugmentedDataset")
 
+        # In-memory cache for keypoints, keyed by (anno_path, mtime)
+        self._kpt_cache = {}
+
         # Determine the root directories based on the dataset split.
         self.root_dirs = self._get_root_dirs(sets, train_root, test_root, val_root)
         
@@ -146,10 +149,20 @@ class L3SFV2AugmentedDataset:
                 ext_used = ext
                 break
 
-        keypoints = []
         if not anno_file:
             print(f"Warning: Keypoint file not found for image {img_path.name}.")
-            return keypoints
+            return []
+
+        # Check cache by (anno_path, mtime)
+        try:
+            mtime = os.path.getmtime(anno_file)
+        except OSError:
+            mtime = None
+        cache_key = (str(anno_file), mtime)
+        if cache_key in self._kpt_cache:
+            return self._kpt_cache[cache_key]
+
+        keypoints = []
 
         prefix = f"{img_path.parent.name}_{img_path.stem}"
         try:
@@ -182,6 +195,9 @@ class L3SFV2AugmentedDataset:
                             continue
         except Exception as e:
             print(f"Error opening {anno_file}: {e}")
+        else:
+            # Save to cache only if parsing succeeded without raising.
+            self._kpt_cache[cache_key] = keypoints
 
         return keypoints
         
