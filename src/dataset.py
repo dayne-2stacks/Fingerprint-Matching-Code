@@ -50,15 +50,19 @@ class L3SFV2AugmentedDataset:
         self.cache_path = Path(cache_path)
         self.cache_path.mkdir(exist_ok=True, parents=True)
         self.task = task
-        
+
+        # Ensure an output directory is available. Subclasses can set
+        # self.output_dir before calling super().__init__ to override this.
+        if not hasattr(self, "output_dir"):
+            self.output_dir = Path("data/L3SFV2AugmentedDataset")
+
         # Determine the root directories based on the dataset split.
         self.root_dirs = self._get_root_dirs(sets, train_root, test_root, val_root)
         
         # Collect image files from the provided directories.
         self.image_list = self._collect_images(self.root_dirs)
-        
-        # Process the images to build the annotation dictionary and save as JSON.
-        self.process()
+
+        # Note: processing is deferred. Use `to_json()` to build or reuse output.
 
     def _get_root_dirs(self, sets, train_root, test_root, val_root):
         """Return a list of Path objects for image search."""
@@ -83,6 +87,36 @@ class L3SFV2AugmentedDataset:
                 for img_file in dir_path.glob(ext):
                     images.append(img_file)
         return images
+
+    def _output_file_path(self) -> Path:
+        """Return the expected path to the processed JSON for this instance."""
+        return Path(self.output_dir) / f"{self.sets}-{self.obj_resize}.json"
+
+    def to_json(self, force: bool = False) -> Path:
+        """
+        Build annotations JSON if needed and return its path.
+        - If the JSON already exists and force=False, reuse the existing file.
+        - If force=True, rebuild the JSON.
+        """
+        output_file = self._output_file_path()
+        if output_file.exists() and not force:
+            print(f"Using existing annotation file: {output_file}")
+            return output_file
+        # (Re)build annotations
+        self.process()
+        return output_file
+
+    def clear(self) -> None:
+        """Delete the processed JSON file for this dataset instance, if it exists."""
+        output_file = self._output_file_path()
+        try:
+            if output_file.exists():
+                output_file.unlink()
+                print(f"Deleted annotation file: {output_file}")
+            else:
+                print(f"No annotation file to delete: {output_file}")
+        except Exception as e:
+            print(f"Failed to delete {output_file}: {e}")
 
 
     def _get_keypoints(self, img_path):
@@ -198,9 +232,8 @@ class L3SFV2AugmentedDataset:
             
             data_dict[unique_id] = anno
         
-        output_dir = Path("data/L3SFV2Augmented")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"{self.sets}-{self.obj_resize}.json"
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        output_file = self._output_file_path()
         with open(output_file, "w") as f:
             json.dump(data_dict, f, indent=4)
         print(f"Annotation file saved at: {output_file}")
@@ -499,5 +532,6 @@ if __name__ == "__main__":
         sets='train',
         obj_resize=(320, 240),
     )
-    dic = dataset_train._get_anno_dict(Path("dataset/PolyU/DBII/train/DBII_1_1_1.png"))
-    print(dic["univ_size"])
+    # Build or reuse the processed JSON annotations file
+    json_path = dataset_train.to_json()
+    print(f"Annotations JSON: {json_path}")
