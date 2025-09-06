@@ -1,16 +1,16 @@
 train:
-  start_epoch: 0         # Set to a positive integer to resume from a checkpoint
-  num_iterations: 25    # Iterations per epoch
+  start_epoch: 0
+  num_iterations: 25
   BATCH_SIZE: 1
-  K_Optimize: false      # Only train the match classifier in stage 5
-  K_LOSS: false          # Whether to use k_loss as the primary metric for early stopping
-  LR: 1.e-4              # Learning rate for match classifier
-  BACKBONE_LR: 1.e-7      # Learning rate for backbone parameters (unused)
-  K_LR: 1.e-7             # Learning rate for k-regression (unused)
-  LR_DECAY: 0.5          # LR decay factor
-  patience: 5           # Early stopping patience (in epochs)
+  K_Optimize: true
+  K_LOSS: false
+  LR: 1.e-4
+  BACKBONE_LR: 1.e-4
+  K_LR: 1.e-4
+  LR_DECAY: 0.5
+  patience: 5
   num_epochs: 20
 
 ngm:
-  REGRESSION: true       # If true, use predicted k in stage 5; otherwise, use ground truth k
+  REGRESSION: true
   

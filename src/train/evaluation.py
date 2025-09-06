@@ -29,9 +29,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else float(cls_loss)
-            # For stage 4 we exclude the primary permutation loss from the
-            # total used for guidance/early stopping.
-            if stage == 4:
+            # For stage 4 and 5 we exclude the primary permutation loss from the
+            # total used for guidance/early stopping to align with training.
+            if stage in (4, 5):
                 total_loss_value = ks_loss_value + cls_loss_value
             else:
                 total_loss_value = loss_value + ks_loss_value + cls_loss_value

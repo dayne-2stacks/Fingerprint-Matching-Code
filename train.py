@@ -33,7 +33,7 @@ from utils.matching import build_matches
 start_epoch = float('inf')
 # config_files =- ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
-config_files = ["stage4.yml", "stage5.yml" ]
+config_files = ["stage4.yml", "stage5.yml", "stage6.yml" ]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -119,13 +119,15 @@ for file in config_files:
         stage = 4
     elif "stage5" in file:
         stage = 5
+    elif "stage6" in file:
+        stage = 6
     else:
         stage = None
 
     # =====================================================
     # Dataset and Dataloader
     # =====================================================
-    task = 'classify' if stage in (4, 5) else 'match'
+    task = 'classify' if stage in (4, 5, 6) else 'match'
     dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len, task=task)
     # =====================================================
     # Model, Loss, and Device Setup
@@ -209,7 +211,15 @@ for file in config_files:
         optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
         optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
     elif stage == 5:
-        print("Stage 5: Training match classifier only.")
+        print("Stage 5: Classification training, optimizing K, graph matcher, and backbone (freeze classifier).")
+        # Train everything except the match classifier to learn from negatives
+        for name, param in model.named_parameters():
+            param.requires_grad = id(param) not in match_cls_ids
+        K_Optimize = True
+        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
+    elif stage == 6:
+        print("Stage 6: Training match classifier only.")
         for name, param in model.named_parameters():
             param.requires_grad = id(param) in match_cls_ids
         K_Optimize = False
