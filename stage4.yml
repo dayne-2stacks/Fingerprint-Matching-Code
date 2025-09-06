@@ -9,6 +9,6 @@ train:
   K_LR: 1.e-4
   LR_DECAY: 0.5
   patience: 5
-  num_epochs: 15
+  num_epochs: 20
 ngm:
   REGRESSION: true

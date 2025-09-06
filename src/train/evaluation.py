@@ -8,7 +8,7 @@ from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
 
 
-def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
+def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None):
     model.eval()
     val_loss_sum = 0.0
     val_ks_sum = 0.0
@@ -29,7 +29,12 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else float(cls_loss)
-            total_loss_value = loss_value + ks_loss_value + cls_loss_value
+            # For stage 4 we exclude the primary permutation loss from the
+            # total used for guidance/early stopping.
+            if stage == 4:
+                total_loss_value = ks_loss_value + cls_loss_value
+            else:
+                total_loss_value = loss_value + ks_loss_value + cls_loss_value
 
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):

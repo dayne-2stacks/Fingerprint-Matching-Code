@@ -38,8 +38,15 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, optimizer_
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss) + (
-                cls_loss if isinstance(cls_loss, torch.Tensor) else cls_loss)
+            # In stage 4 (classification + K optimization), exclude the primary
+            # permutation loss from the optimization objective so that K is
+            # driven purely by ks_loss (and optionally classification loss).
+            if stage == 4:
+                total_loss = (ks_loss if isinstance(ks_loss, torch.Tensor) else torch.tensor(ks_loss, device=device)) 
+                total_loss = total_loss + (cls_loss if isinstance(cls_loss, torch.Tensor) else torch.tensor(cls_loss, device=device))
+            else:
+                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss) + (
+                    cls_loss if isinstance(cls_loss, torch.Tensor) else cls_loss)
             total_loss_value = total_loss.item()
 
             epoch_loss_sum += loss_value

@@ -31,9 +31,9 @@ from utils.matching import build_matches
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 start_epoch = float('inf')
-# config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
+# config_files =- ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
-config_files = ["stage4.yml" ]
+config_files = ["stage4.yml", "stage5.yml" ]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -42,7 +42,8 @@ start_file = start_path / "checkpoint.json"
 log_dir = Path("logs/tensorboard")
 log_dir.mkdir(parents=True, exist_ok=True)
 
-PRETRAINED_PATH = "results/base/params/best_model.pt" 
+PRETRAINED_PATH = "results/base/params/best_model.pt"
+# PRETRAINED_PATH = ""
 
 
 for file in config_files:
@@ -92,6 +93,8 @@ for file in config_files:
 
     # File paths
     train_root = 'dataset/Synthetic'
+    # OUTPUT_PATH = "results/base"
+    
     OUTPUT_PATH = "results/binary-classifier"
 
     # =====================================================
@@ -353,6 +356,7 @@ for file in config_files:
             writer,
             epoch,
             logger,
+            stage,
         )
     
         
