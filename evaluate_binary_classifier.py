@@ -98,6 +98,11 @@ def evaluate(dataset_name: str, data_root: str):
             if "cls_prob" in outputs:
                 prob = outputs["cls_prob"].detach()
                 print("using cls_prob")
+                if "perm_mat" in outputs:
+                    perm_mat = outputs["perm_mat"].detach()
+                    k_pred = perm_mat.sum(dim=(1, 2)).float()
+                else:
+                    k_pred = torch.zeros(prob.shape[0], dtype=torch.float32, device=prob.device)
             else:
                 # Fallback to using the ratio of predicted correspondences
                 perm_mat = outputs["perm_mat"].detach()
