@@ -29,9 +29,10 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else float(cls_loss)
-            # For stage 4 and 5 we exclude the primary permutation loss from the
-            # total used for guidance/early stopping to align with training.
-            if stage in (4, 5):
+            # Stage-specific aggregation for validation reporting
+            if stage == 6:
+                total_loss_value = cls_loss_value
+            elif stage in (4, 5):
                 total_loss_value = ks_loss_value + cls_loss_value
             else:
                 total_loss_value = loss_value + ks_loss_value + cls_loss_value
@@ -94,7 +95,11 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                 else:
                     acc = acc.item()
 
-            test_loss_sum += loss.item() + (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss)
+            if stage == 6:
+                # Only classification objective contributes in stage 6
+                test_loss_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
+            else:
+                test_loss_sum += loss.item() + (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss)
             test_cls_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
             test_accuracy_sum += acc
 

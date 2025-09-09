@@ -34,14 +34,19 @@ class L3SFV2AugmentedBenchmark(Benchmark):
 
         # Instantiate the dataset. ``task`` controls whether we operate in
         # matching or classification mode.
-        # (The dataset ``__init__`` is expected to generate the JSON files if
-        # they do not exist.)
+        # Ensure the JSON annotations exist by invoking ``to_json``.
         dataset_instance = dataset_cls(
             sets,
             obj_resize,
             task=task,
             **args,
         )
+        # Ensure on-disk annotations are prepared
+        try:
+            json_path = dataset_instance.to_json()
+        except Exception:
+            # Fallback: proceed and let the later open() raise with context
+            json_path = None
         
         self.task = dataset_instance.task
         # When operating in classification mode, keep the split passed by the
@@ -58,11 +63,14 @@ class L3SFV2AugmentedBenchmark(Benchmark):
         #
         # If your dataset class does not already define these, set them here:
         if not hasattr(dataset_instance, "dataset_dir"):
-            dataset_instance.dataset_dir = f"data/{self.name}"
+            # Prefer dataset-specific output_dir if present
+            out_dir = getattr(dataset_instance, "output_dir", Path(f"data/{self.name}"))
+            dataset_instance.dataset_dir = str(out_dir)
         if not hasattr(dataset_instance, "suffix"):
             dataset_instance.suffix = f"{obj_resize}"
 
-        json_file = os.path.join(
+        # Prefer the path returned by to_json; otherwise construct it
+        json_file = str(json_path) if json_path is not None else os.path.join(
             dataset_instance.dataset_dir,
             f"{sets}-{dataset_instance.suffix}.json",
         )

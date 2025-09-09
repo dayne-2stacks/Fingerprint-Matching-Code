@@ -8,7 +8,7 @@ The dataset is structured as follows:
     
     the annotations include x y coordinates of the keypoints.
     
-You should update the _get_keypoints(self, img_path): function to get the keypoints from the tsv file. there will no longer be an id column since there will only be 1 instance of a subject. 
+Need to update the _get_keypoints(self, img_path): function to get the keypoints from the tsv file. there will no longer be an id column since there will only be 1 instance of a subject. 
 This function should now return the x, y coordinates of the tsv file and creates a label column that auto increments by 1
 
 For the process method
@@ -16,7 +16,7 @@ You would no longer need to split by "_aug_" since there will only be 1 instance
 unique id will remain f"{folder}_{file_stem}" as file stems may be repeated across folders but are different subjects
     
 For get_anno_dict method you should
-    similarly, no longer need to split by "_aug_"
+    no longer need to split by "_aug_"
     also ensure that the keypoint extraction is not redundant
      
 """

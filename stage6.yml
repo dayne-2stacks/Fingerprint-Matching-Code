@@ -9,7 +9,7 @@ train:
   K_LR: 1.e-7             # Learning rate for k-regression (unused)
   LR_DECAY: 0.5          # LR decay factor
   patience: 5           # Early stopping patience (in epochs)
-  num_epochs: 20
+  num_epochs: 50
 
 ngm:
   REGRESSION: true       # If true, use predicted k in stage 6; otherwise, use ground truth k

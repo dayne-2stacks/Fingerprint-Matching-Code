@@ -33,7 +33,8 @@ from utils.matching import build_matches
 start_epoch = float('inf')
 # config_files =- ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
-config_files = ["stage4.yml", "stage5.yml", "stage6.yml" ]
+# config_files = ["stage4.yml", "stage5.yml", "stage6.yml" ]
+config_files = ["stage6.yml"]
 start_path = Path("checkpoints")
 start_path.mkdir(parents=True, exist_ok=True)
 start_file = start_path / "checkpoint.json"
@@ -42,7 +43,7 @@ start_file = start_path / "checkpoint.json"
 log_dir = Path("logs/tensorboard")
 log_dir.mkdir(parents=True, exist_ok=True)
 
-PRETRAINED_PATH = "results/base/params/best_model.pt"
+PRETRAINED_PATH = "results/binary-classifier/params/best_model.pt"
 # PRETRAINED_PATH = ""
 
 
@@ -92,6 +93,7 @@ for file in config_files:
     no_improvement_count = 0
 
     # File paths
+    # Default to the synthetic dataset; override for stage 6
     train_root = 'dataset/Synthetic'
     # OUTPUT_PATH = "results/base"
     
@@ -128,7 +130,12 @@ for file in config_files:
     # Dataset and Dataloader
     # =====================================================
     task = 'classify' if stage in (4, 5, 6) else 'match'
-    dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len, task=task)
+    dataset_kind = 'aug'
+    if stage == 6:
+        # Use L3SF session/identity-based pairing for stage 6
+        train_root = 'dataset/L3-SF'
+        dataset_kind = 'l3sf'
+    dataloader, val_dataloader, test_dataloader = build_dataloaders(train_root, dataset_len, task=task, dataset_kind=dataset_kind)
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================

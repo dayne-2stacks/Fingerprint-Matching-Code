@@ -38,10 +38,12 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, optimizer_
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
-            # In stage 4 and 5 (classification phases), exclude the primary
-            # permutation loss from the optimization objective so that K/backbone/matcher
-            # are driven by ks_loss (and optionally classification loss).
-            if stage in (4, 5):
+            # Stage-specific objective composition
+            # - Stage 6: train classifier only
+            # - Stage 4/5: exclude primary permutation loss
+            if stage == 6:
+                total_loss = cls_loss if isinstance(cls_loss, torch.Tensor) else torch.tensor(cls_loss, device=device)
+            elif stage in (4, 5):
                 total_loss = (ks_loss if isinstance(ks_loss, torch.Tensor) else torch.tensor(ks_loss, device=device)) 
                 total_loss = total_loss + (cls_loss if isinstance(cls_loss, torch.Tensor) else torch.tensor(cls_loss, device=device))
             else:
