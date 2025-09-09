@@ -36,9 +36,6 @@ from utils.visualize import visualize_stochastic_matrix, visualize_match, to_gra
 
 def evaluate(dataset_name: str, data_root: str):
     """Run evaluation using the best classifier model for the chosen dataset.
-
-    Metrics are written to ``metrics.csv`` and also logged to ``eval.log``
-    inside ``results/binary-classifier``.
     """
     dataset_len = None
 
@@ -79,9 +76,7 @@ def evaluate(dataset_name: str, data_root: str):
 
     match_net = Net(regression=True)
 
-    # Load the best weights of the classifier model. The network outputs a
-    # match probability that combines both the predicted number of
-    # correspondences and the underlying similarity scores.
+
     model_path = Path("results/binary-classifier/params/best_model.pt")
 
     if model_path.exists():
@@ -92,7 +87,7 @@ def evaluate(dataset_name: str, data_root: str):
 
     all_labels = []
     all_probs = []
-    all_raw_k = []  # Add this line to store raw k values
+    all_raw_k = []  
     iteration = 0
     with torch.no_grad():
         for batch in dataloader:
@@ -102,6 +97,7 @@ def evaluate(dataset_name: str, data_root: str):
             outputs = match_net(batch)
             if "cls_prob" in outputs:
                 prob = outputs["cls_prob"].detach()
+                print("using cls_prob")
             else:
                 # Fallback to using the ratio of predicted correspondences
                 perm_mat = outputs["perm_mat"].detach()
@@ -111,7 +107,7 @@ def evaluate(dataset_name: str, data_root: str):
                 prob = (k_pred / min_points).clamp(0, 1)
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
-            all_raw_k.append(k_pred.cpu())  # Add this line to store raw k values
+            all_raw_k.append(k_pred.cpu()) 
             if iteration % 5 == 0:
                 print(f"Processed {iteration} batches...")
                 
