@@ -9,7 +9,7 @@ from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
-from utils.augmentation import augment_image
+from utils.augmentation import augment_image, augment_image_pair, augment_two_images
 from itertools import combinations
 from src.model.ngm import UNIV_SIZE
 
@@ -100,6 +100,59 @@ class GMDataset(Dataset):
                 cls_length = self.bm.compute_length(cls)
                 self.length_list.append(cls_length)
 
+        # Prebuild image transform once to avoid per-sample Compose creation
+        self._img_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(NORM_MEANS, NORM_STD)
+        ])
+
+    def _augment_or_standardize_pair_same(self, image, annos, clip_to_univ: bool = False):
+        """Return two views from the same image and filtered annotations.
+
+        If augmenting, uses augment_image_pair; otherwise standardizes twice.
+        Returns: (img1, ann1), (img2, ann2), n_common, perm_mat (identity)
+        Optionally clips to UNIV_SIZE.
+        """
+        if self.augment:
+            (img1, ann1), (img2, ann2) = augment_image_pair(
+                image, annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
+            )
+        else:
+            img1, ann1 = _standardize(image, annos)
+            img2, ann2 = _standardize(image, annos)
+
+        n_common = min(len(ann1), len(ann2))
+        if clip_to_univ and n_common > UNIV_SIZE:
+            ann1 = ann1[:UNIV_SIZE]
+            ann2 = ann2[:UNIV_SIZE]
+            n_common = UNIV_SIZE
+        perm_mat = np.eye(n_common, dtype=np.float32)
+        return (img1, ann1), (img2, ann2), n_common, perm_mat
+
+    def _augment_or_standardize_pair_diff(self, img1_orig, ann1_base, img2_orig, ann2_base, clip_to_univ: bool = False):
+        """Return two views from two different images and annotations.
+
+        If augmenting, uses augment_two_images; otherwise standardizes both.
+        Returns: (img1, ann1), (img2, ann2), n_common(=0), perm_mat (zeros)
+        Optionally clips to UNIV_SIZE for each side.
+        """
+        if self.augment:
+            (img1, ann1), (img2, ann2) = augment_two_images(
+                img1_orig, ann1_base, img2_orig, ann2_base, min_points=5, n_jobs=2
+            )
+        else:
+            img1, ann1 = _standardize(img1_orig, ann1_base)
+            img2, ann2 = _standardize(img2_orig, ann2_base)
+
+        if clip_to_univ:
+            if len(ann1) > UNIV_SIZE:
+                ann1 = ann1[:UNIV_SIZE]
+            if len(ann2) > UNIV_SIZE:
+                ann2 = ann2[:UNIV_SIZE]
+
+        perm_mat = np.zeros((len(ann1), len(ann2)), dtype=np.float32)
+        return (img1, ann1), (img2, ann2), 0, perm_mat
+
 
     def __len__(self):
         return self.length
@@ -153,27 +206,9 @@ class GMDataset(Dataset):
         original_img = cv2.imread(self.bm.get_path(id_list[0]))
         original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         
-        if self.augment:
-            n_common = 0
-            while n_common <= 3:
-                img1, annos1 = augment_image(original_img, original_annos)
-                img2, annos2 = augment_image(original_img, original_annos)
-                labels1 = set(a[0] for a in annos1)
-                labels2 = set(a[0] for a in annos2)
-                common_labels = labels1.intersection(labels2)
-                n_common = len(common_labels)
-
-            annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-            annos2_filtered = [a for a in annos2 if a[0] in common_labels]
-            perm_mat = np.eye(n_common, dtype=np.float32)
-        else:
-            img1, annos1 = _standardize(original_img, original_annos)
-            img2, annos2 = _standardize(original_img, original_annos)
-            common_labels = [a[0] for a in annos1]
-            n_common = len(common_labels)
-            annos1_filtered = annos1
-            annos2_filtered = annos2
-            perm_mat = np.eye(n_common, dtype=np.float32)
+        # Two views from the same image; do not clip to UNIV_SIZE here
+        (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
+            self._augment_or_standardize_pair_same(original_img, original_annos, clip_to_univ=False)
 
 
         # create permutation pair
@@ -258,11 +293,7 @@ class GMDataset(Dataset):
 
         imgs = [img1, img2]
         if imgs[0] is not None:
-            trans = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(NORM_MEANS,NORM_STD)
-                    ])
-            imgs = [trans(img) for img in imgs]
+            imgs = [self._img_transform(img) for img in imgs]
             ret_dict['images'] = imgs
         # elif 'feat' in anno_pair[0]['kpts'][0]:
         #     feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
@@ -292,31 +323,8 @@ class GMDataset(Dataset):
             original_img = cv2.imread(img_path)
             original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
 
-            if self.augment:
-                n_common = 0
-                while n_common <= 3:
-                    img1, annos1 = augment_image(original_img, original_annos)
-                    img2, annos2 = augment_image(original_img, original_annos)
-                    labels1 = set(a[0] for a in annos1)
-                    labels2 = set(a[0] for a in annos2)
-                    common_labels = labels1.intersection(labels2)
-                    n_common = len(common_labels)
-                annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-                annos2_filtered = [a for a in annos2 if a[0] in common_labels]
-            else:
-                img1, annos1_filtered = _standardize(original_img, original_annos)
-                img2, annos2_filtered = _standardize(original_img, original_annos)
-                n_common = len(annos1_filtered)
-
-            perm_mat = np.eye(n_common, dtype=np.float32)
-
-            # Limit the number of keypoints to match the model's universal size
-            max_points = min(n_common, UNIV_SIZE)
-            if n_common > max_points:
-                annos1_filtered = annos1_filtered[:max_points]
-                annos2_filtered = annos2_filtered[:max_points]
-                n_common = max_points
-                perm_mat = np.eye(n_common, dtype=np.float32)
+            (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
+                self._augment_or_standardize_pair_same(original_img, original_annos, clip_to_univ=True)
         else:
             img_path1 = self.bm.get_path(pair[0])
             img_path2 = self.bm.get_path(pair[1])
@@ -325,22 +333,8 @@ class GMDataset(Dataset):
             annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
-            if self.augment:
-                img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                img2, annos2_filtered = augment_image(img2_orig, annos2_base)
-            else:
-                img1, annos1_filtered = _standardize(img1_orig, annos1_base)
-                img2, annos2_filtered = _standardize(img2_orig, annos2_base)
-
-            # Restrict keypoints for imposter pairs as well
-            max_points = UNIV_SIZE
-            if len(annos1_filtered) > max_points:
-                annos1_filtered = annos1_filtered[:max_points]
-            if len(annos2_filtered) > max_points:
-                annos2_filtered = annos2_filtered[:max_points]
-
-            perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
-            n_common = 0
+            (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
+                self._augment_or_standardize_pair_diff(img1_orig, annos1_base, img2_orig, annos2_base, clip_to_univ=True)
 
         P1 = np.array([[x, y] for _, x, y in annos1_filtered])
         P2 = np.array([[x, y] for _, x, y in annos2_filtered])
@@ -364,11 +358,7 @@ class GMDataset(Dataset):
 
         imgs = [img1, img2]
         if imgs[0] is not None:
-            trans = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(NORM_MEANS, NORM_STD)
-                    ])
-            imgs = [trans(img) for img in imgs]
+            imgs = [self._img_transform(img) for img in imgs]
 
         ret_dict = {
             'Ps': [torch.Tensor(x) for x in [P1, P2]],
@@ -426,8 +416,9 @@ class TestDataset(GMDataset):
                 annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
                 if self.augment:
-                    img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                    img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
+                        img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
+                    )
                 else:
                     img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                     img2, annos2_filtered = _standardize(img2_orig, annos2_base)
@@ -448,16 +439,10 @@ class TestDataset(GMDataset):
                 original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
 
                 if self.augment:
-                    n_common = 0
-                    while n_common <= 3:
-                        img1, annos1 = augment_image(original_img, original_annos)
-                        img2, annos2 = augment_image(original_img, original_annos)
-                        labels1 = set(a[0] for a in annos1)
-                        labels2 = set(a[0] for a in annos2)
-                        common_labels = labels1.intersection(labels2)
-                        n_common = len(common_labels)
-                    annos1_filtered = [a for a in annos1 if a[0] in common_labels]
-                    annos2_filtered = [a for a in annos2 if a[0] in common_labels]
+                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_image_pair(
+                        original_img, original_annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
+                    )
+                    n_common = min(len(annos1_filtered), len(annos2_filtered))
                 else:
                     img1, annos1_filtered = _standardize(original_img, original_annos)
                     img2, annos2_filtered = _standardize(original_img, original_annos)
@@ -482,8 +467,9 @@ class TestDataset(GMDataset):
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
 
             if self.augment:
-                img1, annos1_filtered = augment_image(img1_orig, annos1_base)
-                img2, annos2_filtered = augment_image(img2_orig, annos2_base)
+                (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
+                    img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
+                )
             else:
                 img1, annos1_filtered = _standardize(img1_orig, annos1_base)
                 img2, annos2_filtered = _standardize(img2_orig, annos2_base)
@@ -520,11 +506,7 @@ class TestDataset(GMDataset):
 
         imgs = [img1, img2]
         if imgs[0] is not None:
-            trans = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(NORM_MEANS, NORM_STD)
-                    ])
-            imgs = [trans(img) for img in imgs]
+            imgs = [self._img_transform(img) for img in imgs]
 
         ret_dict = {
             'Ps': [torch.Tensor(x) for x in [P1, P2]],

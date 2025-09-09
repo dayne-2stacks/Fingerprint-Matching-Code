@@ -8,7 +8,7 @@ from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
 
 
-def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
+def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None):
     model.eval()
     val_loss_sum = 0.0
     val_ks_sum = 0.0
@@ -29,7 +29,13 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else float(cls_loss)
-            total_loss_value = loss_value + ks_loss_value + cls_loss_value
+            # Stage-specific aggregation for validation reporting
+            if stage == 6:
+                total_loss_value = cls_loss_value
+            elif stage in (4, 5):
+                total_loss_value = ks_loss_value + cls_loss_value
+            else:
+                total_loss_value = loss_value + ks_loss_value + cls_loss_value
 
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
@@ -63,7 +69,7 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger):
     print(log_msg)
     logger.info(log_msg)
 
-    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
+    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, avg_cls_loss
 
 
 def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None):
@@ -89,7 +95,11 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                 else:
                     acc = acc.item()
 
-            test_loss_sum += loss.item() + (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss)
+            if stage == 6:
+                # Only classification objective contributes in stage 6
+                test_loss_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
+            else:
+                test_loss_sum += loss.item() + (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss)
             test_cls_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
             test_accuracy_sum += acc
 

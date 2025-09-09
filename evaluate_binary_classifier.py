@@ -79,8 +79,9 @@ def evaluate(dataset_name: str, data_root: str):
 
     match_net = Net(regression=True)
 
-    # Load the best weights of the classifier model. The predicted k
-    # value from the network determines whether two fingerprints match.
+    # Load the best weights of the classifier model. The network outputs a
+    # match probability that combines both the predicted number of
+    # correspondences and the underlying similarity scores.
     model_path = Path("results/binary-classifier/params/best_model.pt")
 
     if model_path.exists():
@@ -99,11 +100,15 @@ def evaluate(dataset_name: str, data_root: str):
             
             batch = data_to_cuda(batch)
             outputs = match_net(batch)
-            perm_mat = outputs["perm_mat"].detach()
-            k_pred = perm_mat.sum(dim=(1, 2)).float()
-            ns = batch["ns"]
-            min_points = torch.min(ns[0], ns[1]).float()
-            prob = (k_pred / min_points).clamp(0, 1)
+            if "cls_prob" in outputs:
+                prob = outputs["cls_prob"].detach()
+            else:
+                # Fallback to using the ratio of predicted correspondences
+                perm_mat = outputs["perm_mat"].detach()
+                k_pred = perm_mat.sum(dim=(1, 2)).float()
+                ns = batch["ns"]
+                min_points = torch.min(ns[0], ns[1]).float()
+                prob = (k_pred / min_points).clamp(0, 1)
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
             all_raw_k.append(k_pred.cpu())  # Add this line to store raw k values

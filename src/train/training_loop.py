@@ -8,7 +8,8 @@ from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
 
 
-def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, writer, epoch, start_epoch, stage, logger, checkpoint_path):
+def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, optimizer_cls,
+                device, writer, epoch, start_epoch, stage, logger, checkpoint_path):
     epoch_loss_sum = 0.0
     epoch_total_loss_sum = 0.0
     running_ks_loss = 0.0
@@ -25,6 +26,8 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             optimizer.zero_grad()
             if optimizer_k is not None:
                 optimizer_k.zero_grad()
+            if optimizer_cls is not None:
+                optimizer_cls.zero_grad()
 
             outputs = model(batch)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
@@ -35,8 +38,17 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
             cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
-            total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss) + (
-                cls_loss if isinstance(cls_loss, torch.Tensor) else cls_loss)
+            # Stage-specific objective composition
+            # - Stage 6: train classifier only
+            # - Stage 4/5: exclude primary permutation loss
+            if stage == 6:
+                total_loss = cls_loss if isinstance(cls_loss, torch.Tensor) else torch.tensor(cls_loss, device=device)
+            elif stage in (4, 5):
+                total_loss = (ks_loss if isinstance(ks_loss, torch.Tensor) else torch.tensor(ks_loss, device=device)) 
+                total_loss = total_loss + (cls_loss if isinstance(cls_loss, torch.Tensor) else torch.tensor(cls_loss, device=device))
+            else:
+                total_loss = loss + (ks_loss if isinstance(ks_loss, torch.Tensor) else ks_loss) + (
+                    cls_loss if isinstance(cls_loss, torch.Tensor) else cls_loss)
             total_loss_value = total_loss.item()
 
             epoch_loss_sum += loss_value
@@ -51,6 +63,8 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
             optimizer.step()
             if optimizer_k is not None:
                 optimizer_k.step()
+            if optimizer_cls is not None:
+                optimizer_cls.step()
 
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
@@ -104,5 +118,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k, device, wr
     torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
     if optimizer_k is not None:
         torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+    if optimizer_cls is not None:
+        torch.save(optimizer_cls.state_dict(), str(checkpoint_path / f"optim_cls_{epoch + 1:04}.pt"))
 
-    return avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy
+    return avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy, avg_cls_loss
