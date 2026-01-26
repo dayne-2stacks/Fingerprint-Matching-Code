@@ -175,12 +175,12 @@ cython_debug/
 
 *pt
 *.png
-*.jpg
+
 *.json
 result/*
 
 
-dataset/*/
+
 .nfs*
 logs/*
 events.*
