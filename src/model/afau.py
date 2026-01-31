@@ -24,7 +24,7 @@ class Encoder(nn.Module):
     AFA-U graph attention module to generate bipartite node embeddings.
     """
     model_params = {
-        'embedding_dim': 600,
+        'embedding_dim': 450,
         'head_num': 16,
         'qkv_dim': 16,
         'ff_hidden_dim': 256,

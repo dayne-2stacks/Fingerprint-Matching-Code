@@ -12,7 +12,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     model.eval()
     val_loss_sum = 0.0
     val_ks_sum = 0.0
-    val_cls_sum = 0.0
     val_total_sum = 0.0
     val_num = 0
     val_accuracy_sum = 0.0
@@ -24,19 +23,18 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             outputs = model(batch)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-            cls_loss = outputs.get("cls_loss", torch.tensor(0.0, device=device))
+         
 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
-            cls_loss_value = cls_loss.item() if isinstance(cls_loss, torch.Tensor) else float(cls_loss)
             # Stage-specific aggregation for validation reporting
-            if stage == 6:
-                total_loss_value = cls_loss_value
+            if stage == 1:
+                total_loss_value = loss_value
             elif stage in (4, 5):
-                total_loss_value = ks_loss_value + cls_loss_value
+                total_loss_value = ks_loss_value 
             else:
-                total_loss_value = loss_value + ks_loss_value + cls_loss_value
-
+                total_loss_value = loss_value + ks_loss_value 
+            
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
                 if acc.numel() > 1:
@@ -47,36 +45,33 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             val_accuracy_sum += acc
             val_loss_sum += loss_value
             val_ks_sum += ks_loss_value
-            val_cls_sum += cls_loss_value
             val_total_sum += total_loss_value
 
             if val_num % 5 == 0:
                 print(f"Validation batch {val_num} - Loss: {loss_value:.4f}, KS Loss: {ks_loss_value:.4f}, Total Loss: {total_loss_value:.4f}")
 
-    avg_val_loss = val_loss_sum / len(dataloader)
-    avg_ks_loss = val_ks_sum / len(dataloader)
-    avg_val_total = val_total_sum / len(dataloader)
-    avg_val_accuracy = val_accuracy_sum / len(dataloader)
-    avg_cls_loss = val_cls_sum / len(dataloader)
+    avg_val_loss = val_loss_sum / val_num
+    avg_ks_loss = val_ks_sum / val_num
+    avg_val_total = val_total_sum / val_num
+    avg_val_accuracy = val_accuracy_sum / val_num
+
 
     writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
     writer.add_scalar('Validation/KS_Loss', avg_ks_loss, epoch)
-    writer.add_scalar('Validation/Cls_Loss', avg_cls_loss, epoch)
+
     writer.add_scalar('Validation/Total_Loss', avg_val_total, epoch)
     writer.add_scalar('Validation/Accuracy', avg_val_accuracy, epoch)
 
-    log_msg = f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, KS Loss = {avg_ks_loss:.4f}, CLS Loss = {avg_cls_loss:.4f}, Total Loss = {avg_val_total:.4f}"
+    log_msg = f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, KS Loss = {avg_ks_loss:.4f}, Total Loss = {avg_val_total:.4f}"
     print(log_msg)
     logger.info(log_msg)
 
-    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, avg_cls_loss
-
+    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
 
 def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None):
     model.eval()
     test_loss_sum = 0.0
     test_accuracy_sum = 0.0
-    test_cls_sum = 0.0
     last_batch = None
     last_outputs = None
     genuine_pair = None
@@ -87,7 +82,6 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
             batch = data_to_cuda(batch)
             outputs = model(batch)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            cls_loss = outputs.get("cls_loss", torch.tensor(0.0, device=device))
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
                 if acc.numel() > 1:
@@ -95,12 +89,8 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                 else:
                     acc = acc.item()
 
-            if stage == 6:
-                # Only classification objective contributes in stage 6
-                test_loss_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
-            else:
-                test_loss_sum += loss.item() + (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss)
-            test_cls_sum += cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss
+           
+            test_loss_sum += loss.item()
             test_accuracy_sum += acc
 
             if stage == 4 and 'label' in batch:
@@ -166,10 +156,8 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
 
     avg_test_loss = test_loss_sum / len(dataloader)
     avg_test_accuracy = test_accuracy_sum / len(dataloader)
-    avg_test_cls = test_cls_sum / len(dataloader)
 
     writer.add_scalar('Test/Loss', avg_test_loss, epoch)
-    writer.add_scalar('Test/Cls_Loss', avg_test_cls, epoch)
     writer.add_scalar('Test/Accuracy', avg_test_accuracy, epoch)
 
     def _visualize(batch, outputs, tag):
@@ -211,5 +199,5 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
         if imposter_pair is not None:
             _visualize(imposter_pair[0], imposter_pair[1], 'imposter_match')
 
-    print(f"Epoch {epoch}: Test Loss = {avg_test_loss:.4f}, CLS Loss = {avg_test_cls:.4f}, Test Accuracy = {avg_test_accuracy:.4f}")
+    print(f"Epoch {epoch}: Test Loss = {avg_test_loss:.4f}, Test Accuracy = {avg_test_accuracy:.4f}")
     return avg_test_loss, avg_test_accuracy

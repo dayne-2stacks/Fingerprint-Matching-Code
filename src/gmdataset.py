@@ -35,7 +35,7 @@ def _standardize(image, annotation):
 
 RESCALE=(320, 240)
 SRC_GRAPH_CONSTRUCT="tri"
-TGT_GRAPH_CONSTRUCT="same"
+TGT_GRAPH_CONSTRUCT="tri"
 SYM_ADJACENCY=True
 NORM_MEANS= [0.485, 0.456, 0.406] 
 NORM_STD=[0.229, 0.224, 0.225]
@@ -43,10 +43,50 @@ MAX_PROB_SIZE=-1
 
 TYPE = '2GM'
 FP16 = False
-RANDOM_SEED=123
+RANDOM_SEED=145
 BATCH_SIZE=8
-DATALOADER_NUM=6
+DATALOADER_NUM=0
 
+# class GMDataset(Dataset):
+#     def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
+#         # Name of Dataset
+#         self.name = name
+#         # Benchmark Object
+#         self.bm = bm
+#         # Whether to use all graphs
+#         self.using_all_graphs = using_all_graphs
+#         # Object size after resizing
+#         self.obj_size = self.bm.obj_resize
+#         # Determine if in test mode
+#         self.test = True if self.bm.sets == 'test' else False
+#         # Determine if augmentation is to be applied. Always augment during training
+#         if augment is None:
+#             self.augment = self.bm.sets == 'train'
+        
+#         # Class selection
+#         self.classes = self.bm.classes if cls in ['none', 'all'] else [cls]
+
+#         self.problem_type = problem
+
+#         if len(self.classes) > 0:
+#             self.img_num_list = self.bm.compute_img_num(self.classes[0])
+
+#         # All are classification tasks
+#         pairs, total_len = self.bm.get_rand_id_combination()
+
+#         if self.bm.sets == 'test':
+#             # In test mode always use the full set of pairs
+#             self.length = total_len
+#         else:
+#             if length is not None and length < total_len:
+#                 pairs[0] = pairs[0][:length]
+#                 self.length = length
+#             else:
+#                 self.length = total_len
+
+#         self.id_combination = pairs
+#         self.length_list = [self.length]
+        
 
 class GMDataset(Dataset):
     def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
@@ -61,8 +101,6 @@ class GMDataset(Dataset):
             self.augment = augment
         self.cls = None if cls in ['none', 'all'] else cls
 
-        self.task = getattr(self.bm, 'task', 'match')
-
         if self.cls is None:
             self.classes = self.bm.classes # This is 148
         else:
@@ -75,30 +113,22 @@ class GMDataset(Dataset):
             self.img_num_list = self.bm.compute_img_num(self.classes[0])
         else:
             print("Error: self.classes is empty!")
-        if self.task == 'classify':
-            # For classification we rely on the genuine/imposter pairs
-            pairs, total_len = self.bm.get_rand_id_combination()
+        # For classification we rely on the genuine/imposter pairs
+        pairs, total_len = self.bm.get_rand_id_combination()
 
-            if self.bm.sets == 'test':
-                # In test mode always use the full set of pairs
-                self.length = total_len
-            else:
-                # ``length`` may request a subset of pairs during training
-                if length is not None and length < total_len:
-                    pairs[0] = pairs[0][:length]
-                    self.length = length
-                else:
-                    self.length = total_len
-
-            self.id_combination = pairs
-            self.length_list = [self.length]
+        if self.bm.sets == 'test':
+            # In test mode always use the full set of pairs
+            self.length = total_len
         else:
-            # Standard matching task uses pairs from the same class
-            self.id_combination, self.length = self.bm.get_id_combination(self.cls, num=1)
-            self.length_list = []
-            for cls in self.classes:
-                cls_length = self.bm.compute_length(cls)
-                self.length_list.append(cls_length)
+            # ``length`` may request a subset of pairs during training
+            if length is not None and length < total_len:
+                pairs[0] = pairs[0][:length]
+                self.length = length
+            else:
+                self.length = total_len
+
+        self.id_combination = pairs
+        self.length_list = [self.length]
 
         # Prebuild image transform once to avoid per-sample Compose creation
         self._img_transform = transforms.Compose([
@@ -150,7 +180,20 @@ class GMDataset(Dataset):
             if len(ann2) > UNIV_SIZE:
                 ann2 = ann2[:UNIV_SIZE]
 
-        perm_mat = np.zeros((len(ann1), len(ann2)), dtype=np.float32)
+        # perm_mat = np.zeros(
+        #     (len(ann1)+1, len(ann2)+1),
+        #     dtype=np.float32,
+        # )
+
+        perm_mat = np.zeros(
+            (450, 450),
+            dtype=np.float32,
+        )
+
+        perm_mat[-1, :] = 1.0
+        perm_mat[:, -1] = 1.0
+        perm_mat[-1, -1] = 0.0
+        
         return (img1, ann1), (img2, ann2), 0, perm_mat
 
 
@@ -159,10 +202,7 @@ class GMDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.problem_type == '2GM':
-            if self.task == 'classify':
-                return self.get_pair_classify(idx)
-            else:
-                return self.get_pair(idx, self.cls)
+            return self.get_pair(idx)
         else:
             raise NameError("Unknown problem type: {}".format(self.problem_type))
 
@@ -188,129 +228,20 @@ class GMDataset(Dataset):
         )
         return pyg_graph
 
-    def get_pair(self, idx, cls):
-
-        # select a random class
-        cls_num = random.randrange(0, len(self.classes))
-        # Get 2 ids from the selected class
-        ids = list(self.id_combination[cls_num][idx % self.length_list[cls_num]])
-        # Get data from json file about pair
-        anno_pair, perm_mat_, id_list = self.bm.get_data(ids)
-        
-        
-        # Get one of the images (There will only be one since using original dataset)
-        # Load original image and annotations
-        
-        # ``id_list`` contains the image IDs returned from ``Benchmark.get_data``
-        # Use those IDs to load the original image instead of the class label
-        original_img = cv2.imread(self.bm.get_path(id_list[0]))
-        original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
-        
-        # Two views from the same image; do not clip to UNIV_SIZE here
-        (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
-            self._augment_or_standardize_pair_same(original_img, original_annos, clip_to_univ=False)
-
-
-        # create permutation pair
-        # perm_mat = perm_mat_[(0, 1)].toarray()
-        # while min(perm_mat.shape[0], perm_mat.shape[1]) <= 2 or perm_mat.size >= MAX_PROB_SIZE > 0 or perm_mat.sum() == 0:
-        #     anno_pair, perm_mat_, id_list = self.bm.rand_get_data(cls)
-        #     perm_mat = perm_mat_[(0, 1)].toarray()
-
-        cls = [anno['cls'] for anno in anno_pair]
-        # Build graphs for each augmented image
-        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
-        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
-
-        n1, n2 = len(annos1_filtered), len(annos2_filtered)
-
-        univ_size = [anno['univ_size'] for anno in anno_pair]
-
-        P1 = np.array(P1)
-        P2 = np.array(P2)
-    
-
-        A1, G1, H1, e1 = build_graphs(P1, len(P1), stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
-        if TGT_GRAPH_CONSTRUCT == 'same':
-            G2 = perm_mat.transpose().dot(G1)
-            H2 = perm_mat.transpose().dot(H1)
-            A2 = G2.dot(H2.transpose())
-            e2 = e1
-        else:
-            A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
-
-
-        pyg_graph1 = self.to_pyg_graph(A1, P1)
-        pyg_graph2 = self.to_pyg_graph(A2, P2)
-        
-        
-        
-        # ---------------------------------Visualize Matches---------------------------
-        # Make copies so we don't overwrite the original augmented images
-        # img1_vis = img1.copy()
-        # img2_vis = img2.copy()
-
-        # # Draw circles for each pore in img1 and img2
-        # for (x, y) in P1:
-        #     cv2.circle(img1_vis, (int(x), int(y)), 5, (0, 255, 0), -1)  # green circles
-        # for (x, y) in P2:
-        #     cv2.circle(img2_vis, (int(x), int(y)), 5, (255, 0, 0), -1)  # blue circles
-
-        # # Concatenate side by side
-        # # shape = (H, W, 3). Ensure both images have same height
-        # matched_image = np.concatenate([img1_vis, img2_vis], axis=1)
-
-        # # Now, if you want to draw lines showing which pore in P1 matches which in P2:
-        # offset_x = img1_vis.shape[1]  # The width of the first image
-        # for i in range(len(P1)):
-        #     # Because you used perm_mat = np.eye(n_common), 
-        #     # index i in P1 is matched with index i in P2.
-        #     (x1, y1) = P1[i]
-        #     (x2, y2) = P2[i]
-        #     x1, y1 = int(x1), int(y1)
-        #     x2, y2 = int(x2) + offset_x, int(y2)  # shift x2 by the offset
-        #     cv2.line(matched_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
-
-        # # You can save or store matched_image in your return dict
-        # save_matched = f"augmented_pair_{idx}_matched.jpg"
-        # cv2.imwrite(save_matched, matched_image)
-
-        
-        
-
-        ret_dict = {'Ps': [torch.Tensor(x) for x in [P1, P2]],
-                    'ns': [torch.tensor(x) for x in [n1, n2]],
-                    'es': [torch.tensor(x) for x in [e1, e2]],
-                    'gt_perm_mat': perm_mat,
-                    'Gs': [torch.Tensor(x) for x in [G1, G2]],
-                    'Hs': [torch.Tensor(x) for x in [H1, H2]],
-                    'As': [torch.Tensor(x) for x in [A1, A2]],
-                    'pyg_graphs': [pyg_graph1, pyg_graph2],
-                    'cls': [str(x) for x in cls],
-                    'id_list': id_list,
-                    'univ_size': torch.tensor(n_common),
-                    }
-
-        imgs = [img1, img2]
-        if imgs[0] is not None:
-            imgs = [self._img_transform(img) for img in imgs]
-            ret_dict['images'] = imgs
-        # elif 'feat' in anno_pair[0]['kpts'][0]:
-        #     feat1 = np.stack([kp['feat'] for kp in anno_pair[0]['kpts']], axis=-1)
-        #     feat2 = np.stack([kp['feat'] for kp in anno_pair[1]['kpts']], axis=-1)
-        #     ret_dict['features'] = [torch.Tensor(x) for x in [feat1, feat2]]
-
-        return ret_dict
-
-    def get_pair_classify(self, idx):
+    def get_pair(self, idx):
         """Return a pair of graphs for classification (genuine/imposter)."""
         pair = self.id_combination[0][idx % self.length]
+        with open("id_combination_dump.txt", "w") as f:
+            f.write(str(self.id_combination))
+
+        
         result = self.bm.get_data(list(pair))
         if len(result) == 3:
             anno_pair, _, id_list = result
         else:
             anno_pair, id_list = result
 
+        
         cls = [anno['cls'] for anno in anno_pair]
 
         # Determine label: 1 if genuine, 0 if imposter
@@ -318,7 +249,7 @@ class GMDataset(Dataset):
         fid1 = self.bm._finger_id(cls[1]) if hasattr(self.bm, '_finger_id') else cls[1]
         label = 1 if fid0 == fid1 else 0
 
-        if label == 1:
+        if label:
             img_path = self.bm.get_path(pair[0])
             original_img = cv2.imread(img_path)
             original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
@@ -332,14 +263,21 @@ class GMDataset(Dataset):
             img2_orig = cv2.imread(img_path2)
             annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
             annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
-
+            # print("Anno", annos1_base, annos2_base)
             (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
                 self._augment_or_standardize_pair_diff(img1_orig, annos1_base, img2_orig, annos2_base, clip_to_univ=True)
 
+        
+
         P1 = np.array([[x, y] for _, x, y in annos1_filtered])
         P2 = np.array([[x, y] for _, x, y in annos2_filtered])
-
+        
         n1, n2 = len(P1), len(P2)
+
+        # if not label:
+        #     print(annos1_filtered, annos2_filtered)
+        #     print("label", label, "n_common:", n_common)
+        #     print("P1 shape:", P1.shape, "P2 shape:", P2.shape)
 
         A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
         if TGT_GRAPH_CONSTRUCT == 'same':
@@ -379,153 +317,7 @@ class GMDataset(Dataset):
         return ret_dict
     
     
-class TestDataset(GMDataset):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
-    def __getitem__(self, idx):
-        data = super().__getitem__(idx)
-        # Add any additional processing for the test dataset here
-        return data
-    
-    def get_pair_classify(self, idx):
-        """Return a pair of graphs for classification (genuine/imposter)."""
-        pair = self.id_combination[0][idx % self.length]
-        result = self.bm.get_data(list(pair))
-        if len(result) == 3:
-            anno_pair, _, id_list = result
-        else:
-            anno_pair, id_list = result
-
-        cls = [anno['cls'] for anno in anno_pair]
-
-        # Determine label: 1 if genuine, 0 if imposter
-        fid0 = self.bm._finger_id(cls[0]) if hasattr(self.bm, '_finger_id') else cls[0]
-        fid1 = self.bm._finger_id(cls[1]) if hasattr(self.bm, '_finger_id') else cls[1]
-        label = 1 if fid0 == fid1 else 0
-
-        if label == 1:
-            if pair[0] != pair[1]:
-                img_path1 = self.bm.get_path(pair[0])
-                img_path2 = self.bm.get_path(pair[1])
-
-
-                img1_orig = cv2.imread(img_path1)
-                img2_orig = cv2.imread(img_path2)
-                annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
-                annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
-
-                if self.augment:
-                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
-                        img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
-                    )
-                else:
-                    img1, annos1_filtered = _standardize(img1_orig, annos1_base)
-                    img2, annos2_filtered = _standardize(img2_orig, annos2_base)
-
-                if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
-                    return self.get_pair_classify((idx + 1) % self.length)
-
-                if len(annos1_filtered) > UNIV_SIZE:
-                    annos1_filtered = annos1_filtered[:UNIV_SIZE]
-                if len(annos2_filtered) > UNIV_SIZE:
-                    annos2_filtered = annos2_filtered[:UNIV_SIZE]
-
-                perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
-                n_common = 0
-            else:
-                img_path = self.bm.get_path(pair[0])
-                original_img = cv2.imread(img_path)
-                original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
-
-                if self.augment:
-                    (img1, annos1_filtered), (img2, annos2_filtered) = augment_image_pair(
-                        original_img, original_annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
-                    )
-                    n_common = min(len(annos1_filtered), len(annos2_filtered))
-                else:
-                    img1, annos1_filtered = _standardize(original_img, original_annos)
-                    img2, annos2_filtered = _standardize(original_img, original_annos)
-                    n_common = len(annos1_filtered)
-
-                if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
-                    return self.get_pair_classify((idx + 1) % self.length)
-
-                if len(annos1_filtered) > UNIV_SIZE:
-                    annos1_filtered = annos1_filtered[:UNIV_SIZE]
-                    annos2_filtered = annos2_filtered[:UNIV_SIZE]
-                n_common = len(annos1_filtered)
-
-                perm_mat = np.eye(n_common, dtype=np.float32)
-
-        else:
-            img_path1 = self.bm.get_path(pair[0])
-            img_path2 = self.bm.get_path(pair[1])
-            img1_orig = cv2.imread(img_path1)
-            img2_orig = cv2.imread(img_path2)
-            annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
-            annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
-
-            if self.augment:
-                (img1, annos1_filtered), (img2, annos2_filtered) = augment_two_images(
-                    img1_orig, annos1_base, img2_orig, annos2_base, min_points=5, n_jobs=2
-                )
-            else:
-                img1, annos1_filtered = _standardize(img1_orig, annos1_base)
-                img2, annos2_filtered = _standardize(img2_orig, annos2_base)
-
-            if len(annos1_filtered) == 0 or len(annos2_filtered) == 0:
-                return self.get_pair_classify((idx + 1) % self.length)
-
-            if len(annos1_filtered) > UNIV_SIZE:
-                annos1_filtered = annos1_filtered[:UNIV_SIZE]
-            if len(annos2_filtered) > UNIV_SIZE:
-                annos2_filtered = annos2_filtered[:UNIV_SIZE]
-
-            perm_mat = np.zeros((len(annos1_filtered), len(annos2_filtered)), dtype=np.float32)
-            n_common = 0
-        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
-        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
-
-        n1, n2 = len(P1), len(P2)
-
-        A1, G1, H1, e1 = build_graphs(P1, n1, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
-        if TGT_GRAPH_CONSTRUCT == 'same':
-            if perm_mat.sum() == 0:
-                A2, G2, H2, e2 = build_graphs(P2, n2, stg=SRC_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
-            else:
-                G2 = perm_mat.transpose().dot(G1)
-                H2 = perm_mat.transpose().dot(H1)
-                A2 = G2.dot(H2.transpose())
-                e2 = e1
-        else:
-            A2, G2, H2, e2 = build_graphs(P2, n2, stg=TGT_GRAPH_CONSTRUCT, sym=SYM_ADJACENCY)
-
-        pyg_graph1 = self.to_pyg_graph(A1, P1)
-        pyg_graph2 = self.to_pyg_graph(A2, P2)
-
-        imgs = [img1, img2]
-        if imgs[0] is not None:
-            imgs = [self._img_transform(img) for img in imgs]
-
-        ret_dict = {
-            'Ps': [torch.Tensor(x) for x in [P1, P2]],
-            'ns': [torch.tensor(x) for x in [n1, n2]],
-            'es': [torch.tensor(x) for x in [e1, e2]],
-            'gt_perm_mat': perm_mat,
-            'Gs': [torch.Tensor(x) for x in [G1, G2]],
-            'Hs': [torch.Tensor(x) for x in [H1, H2]],
-            'As': [torch.Tensor(x) for x in [A1, A2]],
-            'pyg_graphs': [pyg_graph1, pyg_graph2],
-            'cls': [str(x) for x in cls],
-            'id_list': id_list,
-            'univ_size': torch.tensor(n_common),
-            'images': imgs,
-            'label': torch.tensor(label, dtype=torch.float32)
-        }
-
-        return ret_dict
-    
 
 class QAPDataset(Dataset):
     def __init__(self, name, length, cls=None, **args):

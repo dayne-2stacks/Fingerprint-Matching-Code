@@ -2,36 +2,38 @@ from src.benchmark import L3SFV2AugmentedBenchmark, L3SFBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 
 
-def build_dataloaders(train_root: str, dataset_len: int, task: str = 'match', dataset_kind: str = 'aug'):
+def build_dataloaders(train_root: str, dataset_len: int, benchmark_name: str = "L3SFV2AugmentedBenchmark"):
     """Create dataloaders for training, validation and testing.
 
-    - dataset_kind='aug' uses L3SFV2AugmentedBenchmark (Synthetic)
-    - dataset_kind='l3sf' uses L3SFBenchmark (session/identity pairing)
     """
-    BM = L3SFV2AugmentedBenchmark if dataset_kind != 'l3sf' else L3SFBenchmark
+    BM = {
+        "L3SFV2AugmentedBenchmark": L3SFV2AugmentedBenchmark,
+        "L3SFBenchmark": L3SFBenchmark
+    }[benchmark_name]
 
     benchmark = BM(
         sets='train',
         obj_resize=(320, 240),
-        train_root=train_root,
-        task=task
+        train_root=train_root
     )
 
     test_bm = BM(
         sets='test',
         obj_resize=(320, 240),
-        train_root=train_root,
-        task=task
+        train_root=train_root
     )
 
     val_bm = BM(
         sets='val',
         obj_resize=(320, 240),
-        train_root=train_root,
-        task=task
+        train_root=train_root
     )
 
-    ds_name = "L3SF" if dataset_kind == 'l3sf' else "L3SFV2Augmented"
+    ds_name = {
+        "L3SFV2AugmentedBenchmark": "L3SFV2Augmented",
+        "L3SFBenchmark": "L3SF"
+    }[benchmark_name]
+    
     image_dataset = GMDataset(ds_name, benchmark, dataset_len, True, None, "2GM", augment=True)
     test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM", augment=False)
     val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM", augment=False)

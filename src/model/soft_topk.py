@@ -68,7 +68,8 @@ def greedy_perm(x, top_indices, ks):
         reference_matched_num = round(ks[b].item())
         while matched < reference_matched_num and cur_idx < top_indices.shape[1]:  # torch.ceil(n_points[b])
             idx = top_indices[b][cur_idx]
-            row = idx // x.shape[2]  # row = torch.div(idx, x.shape[2], rounding_mode='floor')
+            # row = idx // x.shape[2]  
+            row = torch.div(idx, x.shape[2], rounding_mode='floor')
             col = idx % x.shape[2]
             if x[b, :, col].sum() < 1 and x[b, row, :].sum() < 1:
                 x[b, row, col] = 1
@@ -246,7 +247,7 @@ class Sinkhorn_m(nn.Module):
             #         ret_log_s = ret_log_s[:, :-dummy_shape[1]]
             #     for b in range(batch_size):
             #         ret_log_s[b, ori_nrows[b]:nrows[b], :ncols[b]] = -float('inf')
-            #
+            
             # if transposed:
             #     ret_log_s = ret_log_s.transpose(1, 2)
             if matrix_input:

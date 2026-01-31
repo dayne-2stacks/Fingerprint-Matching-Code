@@ -49,7 +49,7 @@ GNN_LAYER = 3
 EDGE_EMB=False
 BATCH_SIZE=8
 
-UNIV_SIZE=600
+UNIV_SIZE=450
 SK_ITER_NUM=10
 SK_EPSILON=1e-10
 K_FACTOR=50.
@@ -71,39 +71,6 @@ def concat_features(embeddings, num_vertices):
     res = torch.cat([embedding[:, :num_v] for embedding, num_v in zip(embeddings, num_vertices)], dim=-1)
     return res.transpose(0, 1)
 
-
-class MatchClassifier(nn.Module):
-    """Classifier to determine genuine vs. imposter pairs.
-
-    Rather than relying on a handful of handcrafted statistics, this
-    classifier consumes the full assignment/similarity matrix.  A small CNN
-    encodes spatial correlations in the match map and the resulting embedding
-    is collapsed via global pooling before a final linear layer predicts the
-    genuine/imposter logit.
-    """
-
-    def __init__(self, channels: tuple = (16, 32)):
-        super().__init__()
-        convs = []
-        in_ch = 1
-        for ch in channels:
-            convs.extend([
-                nn.Conv2d(in_ch, ch, kernel_size=3, padding=1),
-                nn.ReLU(),
-                nn.BatchNorm2d(ch),
-                nn.MaxPool2d(2),
-            ])
-            in_ch = ch
-        self.conv = nn.Sequential(*convs)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(in_ch, 1)
-
-    def forward(self, match_mat: torch.Tensor) -> torch.Tensor:
-        """Compute logits from the assignment/similarity matrix."""
-        x = match_mat.unsqueeze(1)
-        x = self.conv(x)
-        x = self.pool(x).view(x.size(0), -1)
-        return self.fc(x).squeeze(-1)
 
 
 # CNN is the VGG16 feature extractor with final fully connected layers
@@ -166,8 +133,6 @@ class Net(CNN):
         
         self.sinkhorn = Sinkhorn(max_iter=SK_ITER_NUM, tau=self.tau, epsilon=SK_EPSILON)
         self.regression = regression
-        if self.regression:
-            print("Improving K")
         self.mean_k = True
         
         
@@ -198,8 +163,7 @@ class Net(CNN):
         {'params': self.final_col.parameters()}
         ]
 
-        # Binary match classifier leveraging richer similarity statistics
-        self.match_cls = MatchClassifier()
+
  
     
     def forward(self, data_dict, regression=True):
@@ -383,7 +347,16 @@ class Net(CNN):
             for i in range(data_dict['gt_perm_mat'].shape[0])
         ], dtype=torch.float32, device=s.device)
 
+        # If it is an imposter match, enforce k = 0 (no true correspondences)
+        if 'label' in data_dict:
+            labels = data_dict['label'].to(s.device).view(-1).long()
+            imposter_mask = labels == 0
+            if imposter_mask.any():
+                gt_ks = gt_ks.clone()
+                gt_ks[imposter_mask] = 0.0
+
         if self.regression:
+            print("Predicting K using AFAU")
             dummy_row = self.univ_size - s.shape[1]
             dummy_col = self.univ_size - s.shape[2]
             assert dummy_row >= 0 and dummy_col >= 0
@@ -398,7 +371,9 @@ class Net(CNN):
                 init_col_emb_one = torch.zeros(int(torch.max(n_points[idx2])), self.univ_size, dtype=torch.float32, device=s.device).scatter_(1, index, 1)
                 init_col_emb[b] = init_col_emb_one
 
-            out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss.detach())
+            # out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss.detach())
+            out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss)
+
             out_emb_row = torch.nn.functional.pad(out_emb_row, (0, 0, 0, dummy_row), value=float('-inf')).permute(0, 2, 1)
             out_emb_col = torch.nn.functional.pad(out_emb_col, (0, 0, 0, dummy_col), value=float('-inf')).permute(0, 2, 1)
             global_row_emb = self.maxpool(out_emb_row).squeeze(-1)
@@ -450,17 +425,10 @@ class Net(CNN):
 
         matched_sim = s * x
 
-        # Binary classification of genuine vs. imposter using full match matrix
-        cls_logits = self.match_cls(matched_sim)
-        cls_prob = torch.sigmoid(cls_logits)
 
-        cls_loss = torch.tensor(0.0, device=s.device)
         if 'label' in data_dict:
             label_tensor = data_dict['label'].to(s.device).view(-1).float()
-            cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                cls_logits, label_tensor
-            )
-
+          
         if self.regression:
             ks_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
             ks_error = torch.nn.functional.l1_loss(ks * min_point_tensor, gt_ks)
@@ -481,8 +449,6 @@ class Net(CNN):
                 'perm_mat': x_list[0],
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
-                'cls_loss': cls_loss,
-                'cls_prob': cls_prob,
                 'k_prob': ks,
             })
         

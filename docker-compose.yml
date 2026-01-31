@@ -5,7 +5,7 @@ services:
     volumes:
       - .:/workspace
     environment:
-      - CUDA_VISIBLE_DEVICES=[0,1]
+      - CUDA_VISIBLE_DEVICES=0,1
     tty: true
     stdin_open: true
     deploy:

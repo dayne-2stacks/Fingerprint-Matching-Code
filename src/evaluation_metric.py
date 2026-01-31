@@ -75,6 +75,17 @@ def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
     batch_num = pmat_pred.shape[0]
 
     pmat_gt = pmat_gt.to(device)
+    print(pmat_pred.shape, pmat_gt.shape)
+    if pmat_gt.shape != pmat_pred.shape:
+        # Keep whatever overlaps, zero-fill the rest (including extra batch entries)
+        pmat_gt_aligned = torch.zeros_like(pmat_pred)
+
+        b = min(pmat_gt.shape[0], pmat_pred.shape[0])
+        n1 = min(pmat_gt.shape[1], pmat_pred.shape[1])
+        n2 = min(pmat_gt.shape[2], pmat_pred.shape[2])
+
+        pmat_gt_aligned[:b, :n1, :n2] = pmat_gt[:b, :n1, :n2]
+        pmat_gt = pmat_gt_aligned
 
     assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
     assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
@@ -82,10 +93,24 @@ def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
     assert torch.all(torch.sum(pmat_gt, dim=-1) <= 1) and torch.all(torch.sum(pmat_gt, dim=-2) <= 1)
 
     acc = torch.zeros(batch_num, device=device)
-    for b in range(batch_num):
-        acc[b] = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]]) / torch.sum(pmat_gt[b, :ns[b]])
+    # for b in range(batch_num):
+    #     acc[b] = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]]) / torch.sum(pmat_gt[b, :ns[b]])
 
-    acc[torch.isnan(acc)] = 1
+    # acc[torch.isnan(acc)] = 1
+
+    for b in range(batch_num):
+        num_correct = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]])
+        denom_gt = torch.sum(pmat_gt[b, :ns[b]])
+        denom_pred = torch.sum(pmat_pred[b, :ns[b]])
+
+        # If there is no GT matching (denom_gt == 0), only perfect if we also predict no matching.
+        # Otherwise, penalize (accuracy = 0).
+        if denom_gt == 0:
+            acc[b] = 1.0 if denom_pred == 0 else 0.0
+        else:
+            acc[b] = num_correct / denom_gt
+
+    acc[torch.isnan(acc)] = 0
 
     return acc
 
