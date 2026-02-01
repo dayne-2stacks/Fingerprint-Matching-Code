@@ -2,6 +2,8 @@ import torch
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import save_model
 from src.evaluation_metric import matching_accuracy
+from src.model.dustbin import strip_dustbin
+
 
 
 
@@ -31,6 +33,12 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
                 
             # Forward pass
             outputs = model(batch)
+
+            outputs["ds_mat"] = strip_dustbin(outputs["ds_mat"])
+            outputs["perm_mat"] = strip_dustbin(outputs["perm_mat"])
+            outputs["gt_perm_mat"] = strip_dustbin(outputs["gt_perm_mat"])
+            outputs["ns"] = [n - 1 for n in outputs["ns"]]
+
 
             # compute loss and their gradients
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])

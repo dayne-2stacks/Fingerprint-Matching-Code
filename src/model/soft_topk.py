@@ -180,6 +180,9 @@ class Sinkhorn_m(nn.Module):
         # operations are performed on log_s
         s = [s[i] / self.tau for i in range(len(s))]
 
+        eps = 1e-12
+        row_prob = row_prob.clamp_min(eps)
+        col_prob = col_prob.clamp_min(eps)
         log_row_prob = torch.log(row_prob).unsqueeze(2)
         log_col_prob = torch.log(col_prob).unsqueeze(1)
 

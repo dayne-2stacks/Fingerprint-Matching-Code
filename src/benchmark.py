@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 # TODO: Fix code so that there aren't duplicate mentions of output_dir / dataset_dir. Only set in one place.
 PAIRING_TASK = "classify"
+ONLY_GENUINE_PAIRS = True
 
 class ClassifyPairs:
     """Default classification pairing logic based on class grouping."""
@@ -46,6 +47,10 @@ class ClassifyPairs:
 
         # Genuine matches: pair each image with itself so two augmented copies
         genuine_pairs = [(img_id, img_id) for id_list in groups.values() for img_id in id_list]
+
+        if ONLY_GENUINE_PAIRS:
+            random.shuffle(genuine_pairs)
+            return genuine_pairs
 
         # Imposter matches: take one representative per finger and pair them uniquely
         representatives = [id_list[0] for id_list in groups.values() if id_list]
@@ -107,6 +112,10 @@ class SessionStancePairMixin(ABC):
             for id1 in s1:
                 for id2 in s2:
                     genuine_pairs.append((id1, id2))
+        if ONLY_GENUINE_PAIRS:
+            random.shuffle(genuine_pairs)
+            return genuine_pairs
+
         # For the first stance only, create imposter pairs
         imposter_pairs = []
         persons = list(set(s1_stance1) | set(s2_stance1))

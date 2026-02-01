@@ -148,7 +148,20 @@ def visualize_match(img0, img1, kp0, kp1, matches, prefix="", filename="matching
     print("cv2_kp1 length:", len(cv2_kp1))
     print("Number of matches found:", len(matches))
 
-    img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, matches, None, flags=2)
+    # Filter matches that point to non-existent keypoints (e.g., dustbin row/col)
+    max_q = len(cv2_kp0)
+    max_t = len(cv2_kp1)
+    filtered_matches = []
+    for m in matches:
+        if m.queryIdx < 0 or m.trainIdx < 0:
+            continue
+        if m.queryIdx >= max_q or m.trainIdx >= max_t:
+            continue
+        filtered_matches.append(m)
+    if len(filtered_matches) != len(matches):
+        print(f"Filtered matches: {len(filtered_matches)}/{len(matches)} kept (invalid indices dropped).")
+
+    img_matches = cv2.drawMatches(img0, cv2_kp0, img1, cv2_kp1, filtered_matches, None, flags=2)
     cv2.imwrite(f"{prefix}{filename}.jpg", img_matches)
     print(f"Matching result saved as '{prefix}{filename}.jpg'.")
 
