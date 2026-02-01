@@ -11,5 +11,10 @@ train:
   patience: 5           # Early stopping patience (in epochs)
   num_epochs: 50
 
+  MODEL_PATH: results/binary-classifier
+  OUTPUT_PATH: results/binary-classifier
+  PRETRAINED_PATH: results/binary-classifier/params/best_model.pt
+  CHECKPOINT_PATH: checkpoints
+  LOG_DIR: logs/tensorboard
 ngm:
   REGRESSION: true       # If true, use predicted k in stage 6; otherwise, use ground truth k

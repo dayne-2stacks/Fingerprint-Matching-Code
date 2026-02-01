@@ -10,5 +10,10 @@ train:
   LR_DECAY: 0.5
   patience: 5
   num_epochs: 20
+  MODEL_PATH: results/binary-classifier
+  OUTPUT_PATH: results/binary-classifier
+  PRETRAINED_PATH: 
+  CHECKPOINT_PATH: checkpoints
+  LOG_DIR: logs/tensorboard
 ngm:
   REGRESSION: true
