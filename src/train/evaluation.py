@@ -7,9 +7,11 @@ from src.evaluation_metric import matching_accuracy
 from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
 
-
 def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None):
+    # Set model to evaluation mode
     model.eval()
+
+    # Initialize running sums and counters
     val_loss_sum = 0.0
     val_ks_sum = 0.0
     val_total_sum = 0.0
@@ -19,22 +21,23 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     with torch.no_grad():
         for batch in dataloader:
             val_num += 1
+
+            # Send data to device
             batch = data_to_cuda(batch)
+
+            # Forward pass
             outputs = model(batch)
+
+            # Compute loss
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-         
-
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
-            # Stage-specific aggregation for validation reporting
-            if stage == 1:
-                total_loss_value = loss_value
-            elif stage in (4, 5):
-                total_loss_value = ks_loss_value 
-            else:
-                total_loss_value = loss_value + ks_loss_value 
+           
+
+            total_loss_value = loss_value + ks_loss_value 
             
+            # Report accuracy
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
                 if acc.numel() > 1:
