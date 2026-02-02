@@ -22,6 +22,7 @@ from utils.models_sl import save_model, load_model, load_optimizer
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 from src.evaluation_metric import matching_accuracy
 from utils.scheduler import WarmupScheduler
+from src.model.dustbin import strip_dustbin
 # Utility function for generating cv2.DMatch lists
 from utils.matching import build_matches
 # from apex import amp
@@ -31,9 +32,9 @@ from utils.matching import build_matches
 
 start_epoch = float('inf')
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
-config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
 # config_files = ["stage4.yml", "stage5.yml", "stage6.yml" ]
-# config_files = ["stage6.yml"]
+config_files = ["stage3.yml"]
 
 for file in config_files:
     scheduler = scheduler_k = None
@@ -134,14 +135,19 @@ for file in config_files:
 
     backbone_ids = [id(item) for item in model.backbone_params]
     k_params = model.k_params_id
-    other_params = [param for param in model.parameters()
-                    if id(param) not in k_params
-                    and id(param) not in backbone_ids
-                    ]
+    dustbin_params = [model.dustbin_bias_src, model.dustbin_bias_tgt]
+    dustbin_ids = {id(param) for param in dustbin_params}
+    other_params = [
+        param for param in model.parameters()
+        if id(param) not in k_params
+        and id(param) not in backbone_ids
+        and id(param) not in dustbin_ids
+    ]
     
     model_params = [
         {'params': other_params},
-        {'params': model.backbone_params, 'lr': BACKBONE_LR}
+        {'params': model.backbone_params, 'lr': BACKBONE_LR},
+        {'params': dustbin_params},
         ]
     
      # -----------------------------------------------------
@@ -168,6 +174,7 @@ for file in config_files:
     elif "stage2" in file:
         stage = 2
         print("Stage 2: Freezing all parameters except k_params (which are unfrozen).")
+        
         for name, param in model.named_parameters():
             if id(param) not in model.k_params_id:
                 param.requires_grad = False
@@ -180,15 +187,29 @@ for file in config_files:
 
     elif "stage3" in file:
         stage = 3
-        # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.s
-        print("Stage 3: Unfreezing all layers for full fine-tuning.")
-        # Unfreeze every parameter
-        for name,  param in model.named_parameters():
-            param.requires_grad = True
+        print("Stage 3: Train dustbin and k_params.")
+        for name, param in model.named_parameters():
+            if id(param) in model.k_params_id or id(param) in dustbin_ids:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
-
+                # In stage 3, train dustbin and k_params.
         optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
+        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
+
+
+    # elif "stage3" in file:
+    #     stage = 3
+    #     # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.s
+    #     print("Stage 3: Unfreezing all layers for full fine-tuning.")
+    #     # Unfreeze every parameter
+    #     for name,  param in model.named_parameters():
+    #         param.requires_grad = True
+
+
+    #     optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
+    #     optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
     elif "stage4" in file:
         stage = 4
     elif "stage5" in file:
@@ -417,6 +438,13 @@ load_model(model, best_model_path)
 model.eval()
 with torch.no_grad():
     outputs = model(single_sample)
+
+if outputs.get("has_dustbin", False):
+    outputs["ds_mat"] = strip_dustbin(outputs["ds_mat"])
+    outputs["perm_mat"] = strip_dustbin(outputs["perm_mat"])
+    if "gt_perm_mat" in outputs:
+        outputs["gt_perm_mat"] = strip_dustbin(outputs["gt_perm_mat"])
+    outputs["ns"] = [n - 1 for n in outputs["ns"]]
     
 acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
 if isinstance(acc, torch.Tensor):

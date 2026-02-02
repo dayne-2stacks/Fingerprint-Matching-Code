@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 
 # TODO: Fix code so that there aren't duplicate mentions of output_dir / dataset_dir. Only set in one place.
 PAIRING_TASK = "classify"
-ONLY_GENUINE_PAIRS = True
+ONLY_GENUINE_PAIRS = False
 
 class ClassifyPairs:
     """Default classification pairing logic based on class grouping."""
@@ -318,10 +318,11 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
                 #     (len(data_list[id_tuple[0]]['kpts'])+1, len(data_list[id_tuple[1]]['kpts'])+1),
                 #     dtype=np.float32,
                 # )
-                perm_mat = np.zeros(
-                    (450, 450),
-                    dtype=np.float32,
-                )
+                n_kpts_a = len(data_list[id_tuple[0]]['kpts'])
+                n_kpts_b = len(data_list[id_tuple[1]]['kpts'])
+                max_kpts = n_kpts_a if n_kpts_a >= n_kpts_b else n_kpts_b
+                size = max_kpts + 1  # dustbin
+                perm_mat = np.zeros((size, size), dtype=np.float32)
 
                 perm_mat[-1, :] = 1.0
                 perm_mat[:, -1] = 1.0
