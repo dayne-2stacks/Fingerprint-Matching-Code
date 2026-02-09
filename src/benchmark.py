@@ -12,9 +12,21 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from abc import ABC, abstractmethod
 
-# TODO: Fix code so that there aren't duplicate mentions of output_dir / dataset_dir. Only set in one place.
+
 PAIRING_TASK = "classify"
 ONLY_GENUINE_PAIRS = False
+
+
+def _normalize_filter(filter_value):
+    if filter_value is None:
+        return None
+    if isinstance(filter_value, str):
+        normalized = filter_value.strip().lower()
+        if normalized in {"", "none", "null"}:
+            return None
+        if normalized in {"intersection", "inclusion"}:
+            return normalized
+    raise ValueError("filter must be one of: None, 'intersection', 'inclusion'")
 
 class ClassifyPairs:
     """Default classification pairing logic based on class grouping."""
@@ -70,6 +82,12 @@ class ClassifyPairs:
             random.sample(imposter_pairs, pair_count),
             2 * pair_count
         )
+
+        #Use all pairs   
+        # pairs = random.sample(
+        #     genuine_pairs + imposter_pairs,
+        #     len(genuine_pairs) + len(imposter_pairs)
+        # )
 
         return pairs
 
@@ -146,6 +164,7 @@ class SessionStancePairMixin(ABC):
         random.shuffle(genuine_pairs)
         random.shuffle(imposter_pairs)
         pairs = genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
+        # pairs = genuine_pairs + imposter_pairs
         random.shuffle(pairs)
         return pairs
 
@@ -175,13 +194,13 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
         raise NotImplementedError
 
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
-                 filter='intersection', task='classify', dataset_cls=L3SFV2AugmentedDataset,
+                 filter=None, task='classify', dataset_cls=L3SFV2AugmentedDataset,
                  name=None, **args):
         task = PAIRING_TASK
         # Instead of a dataset name from a fixed list, we use our new dataset.
         self.name = name if name is not None else getattr(dataset_cls, '__name__', 'CustomDataset')
         self.problem = problem
-        self.filter = filter
+        self.filter = _normalize_filter(filter)
         self.obj_resize = obj_resize
 
         # Instantiate the dataset using the unified pairing protocol.
@@ -491,7 +510,7 @@ class L3SFBenchmark(SessionStancePairMixin, FingerprintBenchmarkBase):
     """Benchmark for the L3SF dataset with classification pair logic."""
 
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
-                 filter='intersection', task='match', **args):
+                 filter=None, task='match', **args):
         super().__init__(
             sets,
             obj_resize=obj_resize,
@@ -526,7 +545,7 @@ class PolyUDBIIBenchmark(PolyUIdParseMixin, SessionStancePairMixin, FingerprintB
     """Benchmark for the PolyU DBII dataset with classification pair logic."""
 
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
-                 filter='intersection', task='match', **args):
+                 filter=None, task='match', **args):
         super().__init__(
             sets,
             obj_resize=obj_resize,
@@ -543,7 +562,7 @@ class PolyUDBIBenchmark(PolyUIdParseMixin, SessionStancePairMixin, FingerprintBe
     """Benchmark for the PolyU DBI dataset with classification pair logic."""
 
     def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
-                 filter='intersection', task='match', **args):
+                 filter=None, task='match', **args):
         super().__init__(
             sets,
             obj_resize=obj_resize,

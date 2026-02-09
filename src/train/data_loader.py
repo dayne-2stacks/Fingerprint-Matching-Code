@@ -2,7 +2,8 @@ from src.benchmark import L3SFV2AugmentedBenchmark, L3SFBenchmark
 from src.gmdataset import GMDataset, get_dataloader
 
 
-def build_dataloaders(train_root: str, dataset_len: int, benchmark_name: str = "L3SFV2AugmentedBenchmark"):
+def build_dataloaders(train_root: str, dataset_len: int, batch_size: int,
+                      benchmark_name: str = "L3SFV2AugmentedBenchmark", filter=None):
     """Create dataloaders for training, validation and testing.
 
     """
@@ -14,19 +15,22 @@ def build_dataloaders(train_root: str, dataset_len: int, benchmark_name: str = "
     benchmark = BM(
         sets='train',
         obj_resize=(320, 240),
-        train_root=train_root
+        train_root=train_root,
+        filter=filter,
     )
 
     test_bm = BM(
         sets='test',
         obj_resize=(320, 240),
-        train_root=train_root
+        train_root=train_root,
+        filter=filter,
     )
 
     val_bm = BM(
         sets='val',
         obj_resize=(320, 240),
-        train_root=train_root
+        train_root=train_root,
+        filter=filter,
     )
 
     ds_name = {
@@ -38,8 +42,8 @@ def build_dataloaders(train_root: str, dataset_len: int, benchmark_name: str = "
     test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM", augment=False)
     val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM", augment=False)
 
-    dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=False)
-    test_dataloader = get_dataloader(test_dataset, shuffle=True, fix_seed=False)
-    val_dataloader = get_dataloader(val_dataset, shuffle=True, fix_seed=False)
+    dataloader = get_dataloader(image_dataset, batch_size=batch_size, shuffle=True, fix_seed=False)
+    test_dataloader = get_dataloader(test_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
+    val_dataloader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
 
     return dataloader, val_dataloader, test_dataloader

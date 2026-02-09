@@ -5,6 +5,7 @@ from utils.feature_align import feature_align
 from src.model.affinity_layer import InnerProductWithWeightsAffinity
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from utils.pad_tensor import pad_tensor
 from utils.factorize_graph_matching import construct_aff_mat, construct_sparse_aff_mat
 from src.model.gnn import PYGNNLayer
@@ -18,8 +19,6 @@ from utils.visualize import *
 import itertools
 from torch_sparse import spmm, SparseTensor
 import yaml
-
-
 
 logger = logging.getLogger(__name__)
 # logging.basicConfig(
@@ -53,6 +52,7 @@ UNIV_SIZE=450
 SK_ITER_NUM=10
 SK_EPSILON=1e-10
 K_FACTOR=50.
+DUSTBIN_LOSS_WEIGHT=1.0
 
 
 
@@ -65,6 +65,16 @@ def lexico_iter(lex):
 def normalize_over_channels(x):
     channel_norms = torch.norm(x, dim=1, keepdim=True).clamp(min=1e-12)
     return x / channel_norms
+
+
+def normalize_keypoints(kpts, image_shape):
+    """Normalize keypoints locations based on image shape."""
+    _, _, height, width = image_shape
+    one = kpts.new_tensor(1)
+    size = torch.stack([one * width, one * height])[None]
+    center = size / 2
+    scaling = size.max(1, keepdim=True).values * 0.7
+    return (kpts - center[:, None, :]) / scaling[:, None, :]
 
 
 def _nan_stats(tag, x):
@@ -95,15 +105,15 @@ def log_sinkhorn_iterations(z, log_mu, log_nu, iters):
     return z + u.unsqueeze(1) + v.unsqueeze(0)
 
 
-def log_optimal_transport(scores, bin_score, iters):
+def log_optimal_transport(scores: torch.Tensor, alpha: torch.Tensor, iters: int) -> torch.Tensor:
+    """Perform Differentiable Optimal Transport in Log-space for stability (2D scores)."""
     m, n = scores.shape
     one = scores.new_tensor(1)
-    ms = (m * one).to(scores)
-    ns = (n * one).to(scores)
+    ms, ns = (m * one).to(scores), (n * one).to(scores)
 
-    bins0 = bin_score.expand(m, 1)
-    bins1 = bin_score.expand(1, n)
-    alpha = bin_score.view(1, 1)
+    bins0 = alpha.expand(m, 1)
+    bins1 = alpha.expand(1, n)
+    alpha = alpha.view(1, 1)
 
     couplings = torch.cat([torch.cat([scores, bins0], -1),
                            torch.cat([bins1, alpha], -1)], 0)
@@ -127,7 +137,19 @@ def log_optimal_transport(scores, bin_score, iters):
 # }
 
 class Net(CNN):
-    def __init__(self, regression=False):
+    def __init__(
+        self,
+        regression=False,
+        k_reg_weight=0.2,
+        k_cls_weight=1.0,
+        dustbin_loss_weight=0.5,
+        k_gate_enable=False,
+        k_gate_thresh=0.2,
+        k_match_rounding="floor",
+        auth_gate_enable=False,
+        auth_gate_thresh=0.5,
+        k_pred_ramp=1.0,
+    ):
         super(Net, self).__init__() # initialize the VGG16 model
         
         # --- Spline-Conv path ------------------------------------------------
@@ -172,14 +194,36 @@ class Net(CNN):
         self.rescale = (320, 240)
         self.univ_size = UNIV_SIZE
         self.k_factor=K_FACTOR
+        self.k_reg_weight = float(k_reg_weight)
+        self.k_cls_weight = float(k_cls_weight)
+        self.dustbin_loss_weight = float(dustbin_loss_weight)
         
         # Classify fingerprint
         self.classifier = nn.Linear(GNN_FEAT[-1] + SK_EMB, 1)
+
+        self.pos_mlp = nn.Sequential(
+            nn.Linear(2, 64),
+            nn.ReLU(),
+            nn.Linear(64, NODE_FEATURE_DIM),
+        )
         
         self.sinkhorn = Sinkhorn(max_iter=SK_ITER_NUM, tau=self.tau, epsilon=SK_EPSILON)
         self.regression = regression
         self.mean_k = True
-        self.dustbin_bias = nn.Parameter(torch.tensor(1.0))
+        self.bin_score = nn.Parameter(torch.tensor(1.0))
+        self.k_gate_enable = bool(k_gate_enable)
+        self.k_gate_thresh = float(k_gate_thresh)
+        self.k_match_rounding = str(k_match_rounding).strip().lower()
+        self.auth_gate_enable = bool(auth_gate_enable)
+        self.auth_gate_thresh = float(auth_gate_thresh)
+        self.k_pred_ramp = float(k_pred_ramp)
+        self.train_stage = None
+        # Authentication head: uses [perm_ratio, k_prob] to output auth logit.
+        self.auth_head = nn.Sequential(
+            nn.Linear(2, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1),
+        )
         
         
         self.k_params_id = []
@@ -210,7 +254,108 @@ class Net(CNN):
         ]
 
 
- 
+    def _sinkhorn_with_marginals(self, scores, row_marginal, col_marginal, iters):
+        eps = 1e-8
+        log_mu = torch.log(row_marginal.clamp_min(eps))
+        log_nu = torch.log(col_marginal.clamp_min(eps))
+        log_p = log_sinkhorn_iterations(scores / self.tau, log_mu, log_nu, iters)
+        return torch.exp(log_p)
+
+    def _dustbin_sinkhorn(self, scores, nrows, ncols, ks):
+        batch, max_n1, max_n2 = scores.shape
+        out = scores.new_zeros(batch, max_n1 + 1, max_n2 + 1)
+        real = scores.new_zeros(batch, max_n1, max_n2)
+        for b in range(batch):
+            n1 = int(nrows[b].item())
+            n2 = int(ncols[b].item())
+            if n1 == 0 and n2 == 0:
+                continue
+            logits = scores[b, :n1, :n2]
+            aug = scores.new_zeros((n1 + 1, n2 + 1))
+            if n1 > 0 and n2 > 0:
+                aug[:n1, :n2] = logits
+            aug[:n1, n2] = self.bin_score
+            aug[n1, :n2] = self.bin_score
+            aug[n1, n2] = self.bin_score
+
+            k = ks[b]
+            max_k = min(n1, n2)
+            k = torch.clamp(k, min=0.0, max=float(max_k))
+            row_m = scores.new_ones(n1 + 1)
+            col_m = scores.new_ones(n2 + 1)
+            row_m[-1] = n2 - k
+            col_m[-1] = n1 - k
+            row_m = row_m.clamp_min(0.0)
+            col_m = col_m.clamp_min(0.0)
+
+            p = self._sinkhorn_with_marginals(aug, row_m, col_m, SK_ITER_NUM)
+            out[b, :n1 + 1, :n2 + 1] = p
+            if n1 > 0 and n2 > 0:
+                real[b, :n1, :n2] = p[:n1, :n2]
+        return out, real
+
+    def _dustbin_supervision_loss(self, pred, gt, nrows, ncols):
+        loss = pred.new_tensor(0.0)
+        count = pred.new_tensor(0.0)
+        eps = 1e-6
+        for b in range(pred.shape[0]):
+            n1 = int(nrows[b].item())
+            n2 = int(ncols[b].item())
+            if n1 > 0:
+                pred_col = pred[b, :n1, n2].clamp(min=eps, max=1.0 - eps)
+                gt_col = gt[b, :n1, n2].to(pred.dtype)
+                loss += F.binary_cross_entropy(pred_col, gt_col, reduction='sum')
+                count += n1
+            if n2 > 0:
+                pred_row = pred[b, n1, :n2].clamp(min=eps, max=1.0 - eps)
+                gt_row = gt[b, n1, :n2].to(pred.dtype)
+                loss += F.binary_cross_entropy(pred_row, gt_row, reduction='sum')
+                count += n2
+        if count > 0:
+            loss = loss / count
+        return loss
+
+    def _compute_k_match(self, ks, gt_ks, min_points, no_pair_mask, training, auth_prob=None):
+        k_pred_count = torch.nan_to_num(
+            ks.view(-1) * min_points, nan=0.0, posinf=0.0, neginf=0.0
+        )
+        train_stage = getattr(self, "train_stage", None)
+        use_pred_k_train = False
+        if train_stage is None:
+            use_pred_k_train = bool(getattr(self, "train_use_pred_k", False))
+        else:
+            use_pred_k_train = int(train_stage) == 4
+
+        if training:
+            k_match = k_pred_count if use_pred_k_train else gt_ks
+        else:
+            k_match = k_pred_count
+
+        if no_pair_mask is not None:
+            k_match = torch.where(no_pair_mask, torch.zeros_like(k_match), k_match)
+
+        if not training:
+            if self.k_gate_enable:
+                k_match = torch.where(
+                    ks.view(-1) < self.k_gate_thresh,
+                    torch.zeros_like(k_match),
+                    k_match,
+                )
+            if self.auth_gate_enable and auth_prob is not None:
+                k_match = torch.where(
+                    auth_prob.view(-1) < self.auth_gate_thresh,
+                    torch.zeros_like(k_match),
+                    k_match,
+                )
+            if self.k_match_rounding == "floor":
+                k_match = torch.floor(k_match)
+            else:
+                k_match = torch.round(k_match)
+
+        k_match = torch.clamp(k_match, min=0.0)
+        k_match = torch.minimum(k_match, min_points)
+        return k_match, k_pred_count
+
     
     def forward(self, data_dict, regression=True):
         images = data_dict['images'] # Loaded from custom dataset
@@ -266,13 +411,18 @@ class Net(CNN):
 
             # arrange features
             U = concat_features(feature_align(nodes, point, num_p, self.rescale), num_p)
-            F = concat_features(feature_align(edges, point, num_p, self.rescale), num_p)
+            edge_feats = concat_features(feature_align(edges, point, num_p, self.rescale), num_p)
             if log_nans:
                 _nan_stats("feature_align_U", U)
-                _nan_stats("feature_align_F", F)
-            node_features = torch.cat((U, F), dim=1)
+                _nan_stats("feature_align_F", edge_feats)
+            node_features = torch.cat((U, edge_feats), dim=1)
             if log_nans:
                 _nan_stats("node_features_cat", node_features)
+            pos = normalize_keypoints(point, image.shape)
+            pos_emb = self.pos_mlp(pos)
+            pos_emb = pos_emb.permute(0, 2, 1)
+            pos_emb = concat_features(pos_emb, num_p)
+            node_features = node_features + pos_emb
             node_feature_list.append(node_features.detach())
             # node_features = self.proj(node_features)
             graph.x = node_features
@@ -405,33 +555,39 @@ class Net(CNN):
         # logger.info("Final emb_K shape: %s", emb_K.shape)
         # logger.info("Final emb shape: %s", emb.shape)
         # print(emb)
-        
+
         v = self.classifier(emb)
         s = v.view(v.shape[0], points[idx2].shape[1], -1).transpose(1, 2)
 
-        ss = self.sinkhorn(s, n_points[idx1], n_points[idx2], dummy_row=True)
+        ss_base = self.sinkhorn(s, n_points[idx1], n_points[idx2], dummy_row=True)
 
         # Calculate the minimum number of keypoints between paired images
-        min_point_list = [int(min(n_points[0][b], n_points[1][b]))
+        min_point_list = [int(min(n_points[idx1][b], n_points[idx2][b]))
                           for b in range(data_dict['gt_perm_mat'].shape[0])]
 
         min_point_tensor = torch.tensor(min_point_list, dtype=torch.float32,
                                         device=s.device)
         min_point_tensor_safe = torch.clamp(min_point_tensor, min=1.0)
 
-        # Ground truth k derived from permutation matrix
+        # Ground truth k derived from real<->real block (exclude dustbin row/col)
         gt_ks = torch.tensor([
-            torch.sum(data_dict['gt_perm_mat'][i])
+            torch.sum(
+                data_dict['gt_perm_mat'][i, :int(n_points[idx1][i].item()), :int(n_points[idx2][i].item())]
+            )
             for i in range(data_dict['gt_perm_mat'].shape[0])
         ], dtype=torch.float32, device=s.device)
 
         # If it is an imposter match, enforce k = 0 (no true correspondences)
+        no_pair_mask = None
         if 'label' in data_dict:
             labels = data_dict['label'].to(s.device).view(-1).long()
             imposter_mask = labels == 0
             if imposter_mask.any():
                 gt_ks = gt_ks.clone()
                 gt_ks[imposter_mask] = 0.0
+            no_pair_mask = imposter_mask | (gt_ks == 0)
+        else:
+            no_pair_mask = (gt_ks == 0)
 
         if self.regression:
             print("Predicting K using AFAU")
@@ -449,7 +605,7 @@ class Net(CNN):
                 init_col_emb_one = torch.zeros(int(torch.max(n_points[idx2])), self.univ_size, dtype=torch.float32, device=s.device).scatter_(1, index, 1)
                 init_col_emb[b] = init_col_emb_one
 
-            out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss.detach())
+            out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss_base.detach())
             # out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss)
 
             out_emb_row = torch.nn.functional.pad(out_emb_row, (0, 0, 0, dummy_row), value=float('-inf')).permute(0, 2, 1)
@@ -466,58 +622,183 @@ class Net(CNN):
 
 
         else:
+            k_logits = None
             ks = torch.where(min_point_tensor > 0, gt_ks / min_point_tensor_safe, torch.zeros_like(gt_ks))
 
-        if self.training:
-            # print("Training mode, using ground truth ks")
-            _, ss_out = soft_topk(
-                ss,
-                gt_ks.view(-1),
+        k_match, k_pred_count = self._compute_k_match(
+            ks,
+            gt_ks,
+            min_point_tensor,
+            no_pair_mask,
+            training=self.training,
+            auth_prob=None,
+        )
+
+        def _build_matching(k_match_local):
+            dustbin_local, real_local = self._dustbin_sinkhorn(
+                s, n_points[idx1], n_points[idx2], k_match_local
+            )
+            _, topk_mask_local = soft_topk(
+                real_local,
+                k_match_local.view(-1),
                 SK_ITER_NUM,
                 self.tau,
                 n_points[idx1],
                 n_points[idx2],
                 True,
             )
-        else:
-            # print("Inference mode, using predicted ks")
-            ks_match = torch.nan_to_num(ks.view(-1) * min_point_tensor, nan=0.0, posinf=0.0, neginf=0.0)
-            _, ss_out = soft_topk(
-                ss,
-                ks_match,
-                SK_ITER_NUM,
-                self.tau,
-                n_points[idx1],
-                n_points[idx2],
-                True,
+            refined_local = topk_mask_local * real_local
+            ds_local = dustbin_local.clone()
+            ds_local[:, :real_local.shape[1], :real_local.shape[2]] = refined_local
+
+            x_local = hungarian(refined_local, n_points[idx1], n_points[idx2])
+            top_indices_local = torch.argsort(
+                x_local.mul(refined_local).reshape(x_local.shape[0], -1), descending=True, dim=-1
             )
+            x_local = torch.zeros_like(refined_local)
+            x_local = greedy_perm(x_local, top_indices_local, k_match_local)
+
+            perm_full_local = refined_local.new_zeros(
+                refined_local.shape[0], refined_local.shape[1] + 1, refined_local.shape[2] + 1
+            )
+            perm_full_local[:, :refined_local.shape[1], :refined_local.shape[2]] = x_local
+            for b in range(perm_full_local.shape[0]):
+                n1 = int(n_points[idx1][b].item())
+                n2 = int(n_points[idx2][b].item())
+                if n1 > 0:
+                    row_sums = x_local[b, :n1, :n2].sum(dim=1)
+                    perm_full_local[b, :n1, n2] = (row_sums == 0).to(perm_full_local.dtype)
+                if n2 > 0:
+                    col_sums = x_local[b, :n1, :n2].sum(dim=0)
+                    perm_full_local[b, n1, :n2] = (col_sums == 0).to(perm_full_local.dtype)
+                perm_full_local[b, n1, n2] = 0.0
+
+            reject_rows_local = []
+            reject_cols_local = []
+            if getattr(self, "dustbin_reject_enable", False):
+                margin = float(getattr(self, "dustbin_reject_margin", 0.0))
+                for b in range(perm_full_local.shape[0]):
+                    n1 = int(n_points[idx1][b].item())
+                    n2 = int(n_points[idx2][b].item())
+                    p = dustbin_local[b]
+                    row_reject = p.new_zeros(n1, dtype=torch.bool)
+                    col_reject = p.new_zeros(n2, dtype=torch.bool)
+                    if n1 > 0 and n2 > 0:
+                        best_j = refined_local[b, :n1, :n2].argmax(dim=1)
+                        best_p = p[torch.arange(n1, device=p.device), best_j]
+                        dust_p = p[:n1, n2]
+                        row_reject = dust_p >= (best_p + margin)
+                        best_i = refined_local[b, :n1, :n2].argmax(dim=0)
+                        best_p_col = p[best_i, torch.arange(n2, device=p.device)]
+                        dust_p_col = p[n1, :n2]
+                        col_reject = dust_p_col >= (best_p_col + margin)
+                    if n1 > 0:
+                        x_local[b, :n1, :n2][row_reject] = 0.0
+                    if n2 > 0:
+                        x_local[b, :n1, :n2][:, col_reject] = 0.0
+                    if n1 > 0:
+                        row_sums = x_local[b, :n1, :n2].sum(dim=1)
+                        perm_full_local[b, :n1, n2] = (row_sums == 0).to(perm_full_local.dtype)
+                    if n2 > 0:
+                        col_sums = x_local[b, :n1, :n2].sum(dim=0)
+                        perm_full_local[b, n1, :n2] = (col_sums == 0).to(perm_full_local.dtype)
+                    perm_full_local[b, :n1, :n2] = x_local[b, :n1, :n2]
+                    reject_rows_local.append(row_reject)
+                    reject_cols_local.append(col_reject)
+            else:
+                for b in range(perm_full_local.shape[0]):
+                    n1 = int(n_points[idx1][b].item())
+                    n2 = int(n_points[idx2][b].item())
+                    reject_rows_local.append(dustbin_local.new_zeros(n1, dtype=torch.bool))
+                    reject_cols_local.append(dustbin_local.new_zeros(n2, dtype=torch.bool))
+
+            return ds_local, x_local, perm_full_local, reject_rows_local, reject_cols_local, dustbin_local
+
+        ds_mat, x, perm_full, reject_rows, reject_cols, dustbin_mat = _build_matching(k_match)
 
         supervised_ks = torch.where(min_point_tensor > 0, gt_ks / min_point_tensor_safe, torch.zeros_like(gt_ks))
+        if no_pair_mask is not None:
+            supervised_ks = torch.where(no_pair_mask, torch.zeros_like(supervised_ks), supervised_ks)
 
-        # Construct hard permutation and filter similarity scores to predicted matches
-        x = hungarian(ss_out, n_points[idx1], n_points[idx2])
-        top_indices = torch.argsort(
-            x.mul(ss_out).reshape(x.shape[0], -1), descending=True, dim=-1
+        # Authentication features and logits.
+        perm_sum = x.sum(dim=(1, 2)).float()
+        perm_ratio = torch.where(
+            min_point_tensor_safe > 0,
+            perm_sum / min_point_tensor_safe,
+            torch.zeros_like(perm_sum),
         )
-        x = torch.zeros(ss_out.shape, device=ss_out.device)
-        ks_match = torch.nan_to_num(ks.view(-1) * min_point_tensor, nan=0.0, posinf=0.0, neginf=0.0)
-        x = greedy_perm(x, top_indices, ks_match)
+        auth_input = torch.stack([perm_ratio, ks.view(-1)], dim=1)
+        auth_logit = self.auth_head(auth_input).squeeze(-1)
+        auth_prob = torch.sigmoid(auth_logit)
 
-
-
-
-        if 'label' in data_dict:
-            label_tensor = data_dict['label'].to(s.device).view(-1).float()
-          
+        if (not self.training) and self.auth_gate_enable:
+            if (auth_prob.view(-1) < self.auth_gate_thresh).any():
+                k_match, k_pred_count = self._compute_k_match(
+                    ks,
+                    gt_ks,
+                    min_point_tensor,
+                    no_pair_mask,
+                    training=False,
+                    auth_prob=auth_prob,
+                )
+                ds_mat, x, perm_full, reject_rows, reject_cols, dustbin_mat = _build_matching(k_match)
+        k_reg_loss = ds_mat.new_tensor(0.0)
+        k_cls_loss = ds_mat.new_tensor(0.0)
+        k_count_loss = ds_mat.new_tensor(0.0)
         if self.regression:
-            ks_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
+            k_reg_loss = torch.nn.functional.mse_loss(ks, supervised_ks) * self.k_factor
+            if "label" in data_dict:
+                labels = data_dict["label"].to(ds_mat.device).view(-1).float()
+                k_cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                    k_logits.view(-1), labels
+                )
+            count_err = torch.nn.functional.smooth_l1_loss(
+                k_pred_count, gt_ks, reduction="none"
+            )
+            count_err = count_err / min_point_tensor_safe
+            k_count_loss = count_err.mean()
+            ks_loss = (self.k_reg_weight * k_reg_loss) + (self.k_cls_weight * k_cls_loss) + k_count_loss
             ks_error = torch.nn.functional.l1_loss(ks * min_point_tensor, gt_ks)
         else:
             ks_loss = 0.0
             ks_error = 0.0
 
-        s_list.append(ss_out)
-        x_list.append(x)
+        if 'gt_perm_mat' in data_dict:
+            dustbin_loss = self._dustbin_supervision_loss(
+                ds_mat, data_dict['gt_perm_mat'], n_points[idx1], n_points[idx2]
+            ) * self.dustbin_loss_weight
+            eps = 1e-8
+            sg_loss = ds_mat.new_tensor(0.0)
+            sg_count = ds_mat.new_tensor(0.0)
+            for b in range(dustbin_mat.shape[0]):
+                n1 = int(n_points[idx1][b].item())
+                n2 = int(n_points[idx2][b].item())
+                if n1 == 0 and n2 == 0:
+                    continue
+                gt_block = data_dict['gt_perm_mat'][b, :n1, :n2]
+                p = dustbin_mat[b]
+                if n1 > 0 and n2 > 0:
+                    match_mask = gt_block > 0.5
+                    if match_mask.any():
+                        sg_loss -= torch.log(p[:n1, :n2].clamp(min=eps))[match_mask].sum()
+                        sg_count += match_mask.sum()
+                if n1 > 0:
+                    row_unmatched = gt_block.sum(dim=1) == 0 if n2 > 0 else torch.ones(n1, dtype=torch.bool, device=p.device)
+                    if row_unmatched.any():
+                        sg_loss -= torch.log(p[:n1, n2].clamp(min=eps))[row_unmatched].sum()
+                        sg_count += row_unmatched.sum()
+                if n2 > 0:
+                    col_unmatched = gt_block.sum(dim=0) == 0 if n1 > 0 else torch.ones(n2, dtype=torch.bool, device=p.device)
+                    if col_unmatched.any():
+                        sg_loss -= torch.log(p[n1, :n2].clamp(min=eps))[col_unmatched].sum()
+                        sg_count += col_unmatched.sum()
+            sg_dustbin_loss = sg_loss / sg_count if sg_count > 0 else ds_mat.new_tensor(0.0)
+        else:
+            dustbin_loss = 0.0
+            sg_dustbin_loss = 0.0
+
+        s_list.append(ds_mat)
+        x_list.append(perm_full)
         indices.append((idx1, idx2))
         
         # print(x)
@@ -529,7 +810,23 @@ class Net(CNN):
                 'perm_mat': x_list[0],
                 'ks_loss': ks_loss,
                 'ks_error': ks_error,
+                'dustbin_loss': dustbin_loss,
+                'sg_dustbin_loss': sg_dustbin_loss,
+                'gt_ks': gt_ks,
+                'k_pred_ratio': ks,
+                'k_pred_count': k_pred_count,
+                'k_match_count': k_match,
+                'k_count_loss': k_count_loss,
                 'k_prob': ks,
+                'k_logit': k_logits,
+                'k_reg_loss': k_reg_loss,
+                'k_cls_loss': k_cls_loss,
+                'auth_logit': auth_logit,
+                'auth_prob': auth_prob,
+                'rejected_rows': reject_rows,
+                'rejected_cols': reject_cols,
+                'ns': [n_points[idx1] + 1, n_points[idx2] + 1],
+                'has_dustbin': True,
             })
         
 

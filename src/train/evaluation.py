@@ -2,24 +2,71 @@ import os
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
+from itertools import islice
 from utils.data_to_cuda import data_to_cuda
 from src.evaluation_metric import matching_accuracy
 from utils.visualize import to_grayscale_cv2_image, visualize_match
 from utils.matching import build_matches
+from src.model.dustbin import strip_dustbin_by_ns
 
-def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None):
+
+def _should_strip_dustbin(outputs):
+    if outputs.get("has_dustbin", False):
+        return True
+    gt = outputs.get("gt_perm_mat")
+    if gt is None:
+        return False
+    if gt.ndim < 3 or gt.shape[-2] < 2 or gt.shape[-1] < 2:
+        return False
+    row_sum = gt[..., -1, :].sum(dim=-1)
+    col_sum = gt[..., :, -1].sum(dim=-2)
+    return bool((row_sum > 1).any() or (col_sum > 1).any())
+
+def _calibrate_auth_threshold(probs, labels):
+    probs = np.asarray(probs)
+    labels = np.asarray(labels).astype(np.int32)
+    if probs.size == 0:
+        return 0.5, None
+    pos = labels.sum()
+    neg = len(labels) - pos
+    if pos == 0 or neg == 0:
+        return 0.5, None
+    order = np.argsort(probs)[::-1]
+    probs_sorted = probs[order]
+    labels_sorted = labels[order]
+    tp = np.cumsum(labels_sorted == 1)
+    fp = np.cumsum(labels_sorted == 0)
+    tpr = tp / pos
+    fpr = fp / neg
+    fnr = 1.0 - tpr
+    idx = np.nanargmin(np.abs(fpr - fnr))
+    return float(probs_sorted[idx]), (tpr, fpr)
+
+
+def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None,
+                   sg_dustbin_weight=1.0, auth_weight=1.0, stage2_full_loss=False, max_iters=None):
     # Set model to evaluation mode
     model.eval()
 
     # Initialize running sums and counters
     val_loss_sum = 0.0
     val_ks_sum = 0.0
+    val_dustbin_sum = 0.0
+    val_sg_dustbin_sum = 0.0
+    val_auth_sum = 0.0
     val_total_sum = 0.0
     val_num = 0
     val_accuracy_sum = 0.0
+    k_pred_list = []
+    k_gt_list = []
+    k_zero_hits = 0
+    k_zero_total = 0
 
+    auth_probs = []
+    auth_labels = []
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in islice(dataloader, max_iters):
             val_num += 1
 
             # Send data to device
@@ -27,15 +74,54 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
 
             # Forward pass
             outputs = model(batch)
+            if _should_strip_dustbin(outputs):
+                n1 = outputs["ns"][0]
+                n2 = outputs["ns"][1]
+                if outputs.get("has_dustbin", False):
+                    n1 = n1 - 1
+                    n2 = n2 - 1
+                outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
+                outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
+                if "gt_perm_mat" in outputs:
+                    outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
+                outputs["ns"] = [n1, n2]
 
             # Compute loss
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+            dustbin_loss = outputs.get("dustbin_loss", torch.tensor(0.0, device=device))
+            sg_dustbin_loss = outputs.get("sg_dustbin_loss", torch.tensor(0.0, device=device))
+            auth_loss = torch.tensor(0.0, device=device)
+            if stage == 4 and "label" in batch and "auth_logit" in outputs:
+                labels = batch["label"].to(device).view(-1).float()
+                auth_loss = F.binary_cross_entropy_with_logits(
+                    outputs["auth_logit"].view(-1), labels
+                )
+            if "auth_prob" in outputs and "label" in batch:
+                auth_probs.append(outputs["auth_prob"].detach().view(-1).cpu())
+                auth_labels.append(batch["label"].detach().view(-1).cpu())
+            if "k_pred_count" in outputs and "gt_ks" in outputs:
+                k_pred_list.append(outputs["k_pred_count"].detach().view(-1).cpu())
+                k_gt_list.append(outputs["gt_ks"].detach().view(-1).cpu())
+                if "label" in batch:
+                    labels = batch["label"].detach().view(-1).cpu()
+                    imp_mask = labels < 0.5
+                    if torch.any(imp_mask):
+                        k_zero_hits += (outputs["k_pred_count"].detach().view(-1).cpu()[imp_mask] < 0.5).sum().item()
+                        k_zero_total += int(imp_mask.sum().item())
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
-           
-
-            total_loss_value = loss_value + ks_loss_value 
+            dustbin_loss_value = dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else float(dustbin_loss)
+            sg_dustbin_loss_value = sg_dustbin_loss.item() if isinstance(sg_dustbin_loss, torch.Tensor) else float(sg_dustbin_loss)
+            total_loss_value = (
+                loss_value
+                + ks_loss_value
+                + dustbin_loss_value
+                + (sg_dustbin_loss_value * sg_dustbin_weight)
+                + (auth_loss.item() * auth_weight)
+            )
+            if stage == 2 and not stage2_full_loss:
+                total_loss_value = ks_loss_value
             
             # Report accuracy
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
@@ -48,6 +134,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             val_accuracy_sum += acc
             val_loss_sum += loss_value
             val_ks_sum += ks_loss_value
+            val_dustbin_sum += dustbin_loss_value
+            val_sg_dustbin_sum += sg_dustbin_loss_value
+            val_auth_sum += auth_loss.item()
             val_total_sum += total_loss_value
 
             if val_num % 5 == 0:
@@ -55,35 +144,88 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
 
     avg_val_loss = val_loss_sum / val_num
     avg_ks_loss = val_ks_sum / val_num
+    avg_dustbin_loss = val_dustbin_sum / val_num
+    avg_sg_dustbin_loss = val_sg_dustbin_sum / val_num
+    avg_val_auth = val_auth_sum / val_num
     avg_val_total = val_total_sum / val_num
     avg_val_accuracy = val_accuracy_sum / val_num
+    if k_pred_list and k_gt_list:
+        k_pred_all = torch.cat(k_pred_list)
+        k_gt_all = torch.cat(k_gt_list)
+        k_mae = torch.mean(torch.abs(k_pred_all - k_gt_all)).item()
+        k_rmse = torch.sqrt(torch.mean((k_pred_all - k_gt_all) ** 2)).item()
+        writer.add_scalar('Validation/K_MAE_Count', k_mae, epoch)
+        writer.add_scalar('Validation/K_RMSE_Count', k_rmse, epoch)
+        if k_zero_total > 0:
+            writer.add_scalar('Validation/K_Zero_Acc', k_zero_hits / k_zero_total, epoch)
+
+    auth_threshold = 0.5
+    auth_auc = None
+    auth_acc = None
+    if auth_probs and auth_labels:
+        probs = torch.cat(auth_probs).numpy()
+        labels = torch.cat(auth_labels).numpy()
+        auth_threshold, curves = _calibrate_auth_threshold(probs, labels)
+        if curves is not None:
+            tpr, fpr = curves
+            auth_auc = float(np.trapz(tpr, fpr))
+        auth_acc = float(((probs >= auth_threshold).astype(np.float32) == labels).mean())
 
 
     writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
     writer.add_scalar('Validation/KS_Loss', avg_ks_loss, epoch)
-
+    writer.add_scalar('Validation/Dustbin_Loss', avg_dustbin_loss, epoch)
+    writer.add_scalar('Validation/SG_Dustbin_Loss', avg_sg_dustbin_loss, epoch)
+    writer.add_scalar('Validation/Auth_Loss', avg_val_auth, epoch)
     writer.add_scalar('Validation/Total_Loss', avg_val_total, epoch)
     writer.add_scalar('Validation/Accuracy', avg_val_accuracy, epoch)
+    if auth_acc is not None:
+        writer.add_scalar('Validation/Auth_Acc', auth_acc, epoch)
+    if auth_auc is not None:
+        writer.add_scalar('Validation/Auth_AUC', auth_auc, epoch)
+    writer.add_scalar('Validation/Auth_Threshold', auth_threshold, epoch)
 
-    log_msg = f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, KS Loss = {avg_ks_loss:.4f}, Total Loss = {avg_val_total:.4f}"
+    log_msg = (
+        f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, "
+        f"KS Loss = {avg_ks_loss:.4f}, Dustbin Loss = {avg_dustbin_loss:.4f}, "
+        f"SG Dustbin Loss = {avg_sg_dustbin_loss:.4f}, "
+        f"Auth Loss = {avg_val_auth:.4f}, "
+        f"Total Loss = {avg_val_total:.4f}, "
+        f"Auth Threshold = {auth_threshold:.4f}"
+    )
     print(log_msg)
     logger.info(log_msg)
 
-    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
+    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, auth_threshold
 
-def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None):
+def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None, auth_threshold=None, max_iters=None):
     model.eval()
     test_loss_sum = 0.0
     test_accuracy_sum = 0.0
+    test_num = 0
+    auth_probs = []
+    auth_labels = []
     last_batch = None
     last_outputs = None
     genuine_pair = None
     imposter_pair = None
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
+        for batch_idx, batch in enumerate(islice(dataloader, max_iters)):
+            test_num += 1
             batch = data_to_cuda(batch)
             outputs = model(batch)
+            if _should_strip_dustbin(outputs):
+                n1 = outputs["ns"][0]
+                n2 = outputs["ns"][1]
+                if outputs.get("has_dustbin", False):
+                    n1 = n1 - 1
+                    n2 = n2 - 1
+                outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
+                outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
+                if "gt_perm_mat" in outputs:
+                    outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
+                outputs["ns"] = [n1, n2]
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
             if isinstance(acc, torch.Tensor):
@@ -95,6 +237,9 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
            
             test_loss_sum += loss.item()
             test_accuracy_sum += acc
+            if "auth_prob" in outputs and "label" in batch:
+                auth_probs.append(outputs["auth_prob"].detach().view(-1).cpu())
+                auth_labels.append(batch["label"].detach().view(-1).cpu())
 
             if stage == 4 and 'label' in batch:
                 # Handle batch of labels instead of assuming single element
@@ -157,11 +302,18 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                 last_batch = batch
                 last_outputs = outputs
 
-    avg_test_loss = test_loss_sum / len(dataloader)
-    avg_test_accuracy = test_accuracy_sum / len(dataloader)
+    denom = max(test_num, 1)
+    avg_test_loss = test_loss_sum / denom
+    avg_test_accuracy = test_accuracy_sum / denom
 
     writer.add_scalar('Test/Loss', avg_test_loss, epoch)
     writer.add_scalar('Test/Accuracy', avg_test_accuracy, epoch)
+    if auth_probs and auth_labels:
+        probs = torch.cat(auth_probs).numpy()
+        labels = torch.cat(auth_labels).numpy()
+        threshold = auth_threshold if auth_threshold is not None else 0.5
+        auth_acc = float(((probs >= threshold).astype(np.float32) == labels).mean())
+        writer.add_scalar('Test/Auth_Acc', auth_acc, epoch)
 
     def _visualize(batch, outputs, tag):
         if 'Ps' in batch:
@@ -173,6 +325,20 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
 
         ds_mat = outputs["ds_mat"].cpu().numpy()[0]
         per_mat = outputs["perm_mat"].cpu().numpy()[0]
+        n1 = outputs["ns"][0]
+        n2 = outputs["ns"][1]
+        if isinstance(n1, torch.Tensor):
+            n1 = int(n1[0].item()) if n1.dim() > 0 else int(n1.item())
+        else:
+            n1 = int(n1)
+        if isinstance(n2, torch.Tensor):
+            n2 = int(n2[0].item()) if n2.dim() > 0 else int(n2.item())
+        else:
+            n2 = int(n2)
+        kp0 = kp0[:n1]
+        kp1 = kp1[:n2]
+        ds_mat = ds_mat[:n1, :n2]
+        per_mat = per_mat[:n1, :n2]
         matches = build_matches(ds_mat, per_mat)
 
         if "id_list" in batch:

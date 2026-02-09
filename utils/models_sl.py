@@ -54,17 +54,52 @@ def load_optimizer(optimizer, path):
         print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
         return
 
-    # If the number of parameter groups doesn't match, skip loading
-    saved_groups = len(state.get("param_groups", []))
-    current_groups = len(optimizer.param_groups)
-    if saved_groups != current_groups:
+    # Filter out any per-parameter state whose tensor shapes don't match the current parameters.
+    saved_groups = state.get("param_groups", [])
+    current_groups = optimizer.param_groups
+    if len(saved_groups) != len(current_groups):
         print(
             "Could not load optimizer state: loaded state dict has a different number of parameter groups. "
             "Starting with fresh optimizer."
         )
         return
 
+    new_state = {"state": {}, "param_groups": saved_groups}
+    for key, value in state.items():
+        if key not in ("state", "param_groups"):
+            new_state[key] = value
+
+    for group_idx, (saved_group, current_group) in enumerate(zip(saved_groups, current_groups)):
+        saved_params = saved_group.get("params", [])
+        current_params = current_group.get("params", [])
+        if len(saved_params) != len(current_params):
+            print(
+                "Could not load optimizer state: loaded state dict has different parameter counts in a group. "
+                "Starting with fresh optimizer."
+            )
+            return
+
+        for param_idx, (saved_param_id, current_param) in enumerate(zip(saved_params, current_params)):
+            state_entry = state.get("state", {}).get(saved_param_id)
+            if not state_entry:
+                continue
+
+            shape_ok = True
+            for state_key, state_value in state_entry.items():
+                if torch.is_tensor(state_value) and state_value.shape != current_param.shape:
+                    shape_ok = False
+                    break
+
+            if shape_ok:
+                new_state["state"][saved_param_id] = state_entry
+            else:
+                print(
+                    "Skipping optimizer state for param group {} index {} due to shape mismatch.".format(
+                        group_idx, param_idx
+                    )
+                )
+
     try:
-        optimizer.load_state_dict(state)
+        optimizer.load_state_dict(new_state)
     except ValueError as e:
         print(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")

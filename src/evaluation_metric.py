@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from itertools import combinations
+from utils.hungarian import hungarian
 
 
 def pck(x: Tensor, x_gt: Tensor, perm_mat: Tensor, dist_threshs: Tensor, ns: Tensor) -> Tensor:
@@ -37,6 +38,7 @@ def pck(x: Tensor, x_gt: Tensor, perm_mat: Tensor, dist_threshs: Tensor, ns: Ten
     batch_num = x.shape[0]
     thresh_num = dist_threshs.shape[1]
 
+    perm_mat = perm_mat[..., :x.shape[1], :x_gt.shape[1]]
     indices = torch.argmax(perm_mat, dim=-1)
 
     dist = torch.zeros(batch_num, x_gt.shape[1], device=device)
@@ -75,7 +77,16 @@ def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
     batch_num = pmat_pred.shape[0]
 
     pmat_gt = pmat_gt.to(device)
-    print(pmat_pred.shape, pmat_gt.shape)
+    # print(pmat_pred.shape, pmat_gt.shape)
+    if pmat_pred.ndim >= 3 and pmat_pred.shape[-2] >= 2 and pmat_pred.shape[-1] >= 2:
+        pred_row_sum = torch.sum(pmat_pred[..., -1, :], dim=-1)
+        pred_col_sum = torch.sum(pmat_pred[..., :, -1], dim=-2)
+        gt_row_sum = torch.sum(pmat_gt[..., -1, :], dim=-1)
+        gt_col_sum = torch.sum(pmat_gt[..., :, -1], dim=-2)
+        if (pred_row_sum > 1).any() or (pred_col_sum > 1).any() or (gt_row_sum > 1).any() or (gt_col_sum > 1).any():
+            pmat_pred = pmat_pred[..., :-1, :-1]
+            pmat_gt = pmat_gt[..., :-1, :-1]
+
     if pmat_gt.shape != pmat_pred.shape:
         # Keep whatever overlaps, zero-fill the rest (including extra batch entries)
         pmat_gt_aligned = torch.zeros_like(pmat_pred)
@@ -87,10 +98,12 @@ def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
         pmat_gt_aligned[:b, :n1, :n2] = pmat_gt[:b, :n1, :n2]
         pmat_gt = pmat_gt_aligned
 
-    assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
+    if not torch.all((pmat_pred == 0) + (pmat_pred == 1)) or \
+       not (torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)):
+        pmat_pred = hungarian(pmat_pred)
+
     assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
     assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
-    assert torch.all(torch.sum(pmat_gt, dim=-1) <= 1) and torch.all(torch.sum(pmat_gt, dim=-2) <= 1)
 
     acc = torch.zeros(batch_num, device=device)
     # for b in range(batch_num):
@@ -99,9 +112,23 @@ def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
     # acc[torch.isnan(acc)] = 1
 
     for b in range(batch_num):
-        num_correct = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]])
-        denom_gt = torch.sum(pmat_gt[b, :ns[b]])
-        denom_pred = torch.sum(pmat_pred[b, :ns[b]])
+        n1 = pmat_pred.shape[1]
+        n2 = pmat_pred.shape[2]
+        ns_b = int(ns[b].item())
+        row_end = min(ns_b, n1 - (1 if n1 == ns_b + 1 else 0))
+        col_end = n2 - (1 if n2 == ns_b + 1 else 0)
+        pmat_gt_b = pmat_gt[b]
+        row_sums = torch.sum(pmat_gt_b, dim=-1)
+        col_sums = torch.sum(pmat_gt_b, dim=-2)
+        bad_rows = row_sums > 1
+        bad_cols = col_sums > 1
+        if bad_rows.any():
+            assert torch.sum(bad_rows) == 1
+        if bad_cols.any():
+            assert torch.sum(bad_cols) == 1
+        num_correct = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt_b[:row_end, :col_end])
+        denom_gt = torch.sum(pmat_gt_b[:row_end, :col_end])
+        denom_pred = torch.sum(pmat_pred[b, :row_end, :col_end])
 
         # If there is no GT matching (denom_gt == 0), only perfect if we also predict no matching.
         # Otherwise, penalize (accuracy = 0).
@@ -139,11 +166,26 @@ def matching_precision(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor
     assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
     assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
     assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
-    assert torch.all(torch.sum(pmat_gt, dim=-1) <= 1) and torch.all(torch.sum(pmat_gt, dim=-2) <= 1)
 
     precision = torch.zeros(batch_num, device=device)
     for b in range(batch_num):
-        precision[b] = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]]) / torch.sum(pmat_pred[b, :ns[b]])
+        n1 = pmat_pred.shape[1]
+        n2 = pmat_pred.shape[2]
+        ns_b = int(ns[b].item())
+        row_end = min(ns_b, n1 - (1 if n1 == ns_b + 1 else 0))
+        col_end = n2 - (1 if n2 == ns_b + 1 else 0)
+        pmat_gt_b = pmat_gt[b]
+        row_sums = torch.sum(pmat_gt_b, dim=-1)
+        col_sums = torch.sum(pmat_gt_b, dim=-2)
+        bad_rows = row_sums > 1
+        bad_cols = col_sums > 1
+        if bad_rows.any():
+            assert torch.sum(bad_rows) == 1
+        if bad_cols.any():
+            assert torch.sum(bad_cols) == 1
+        precision[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt_b[:row_end, :col_end]) / torch.sum(
+            pmat_pred[b, :row_end, :col_end]
+        )
 
     precision[torch.isnan(precision)] = 1
 
@@ -174,10 +216,15 @@ def matching_recall_varied(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Te
 
     acc = torch.zeros(batch_num, device=device)
     for b in range(batch_num):
-        mask = torch.zeros((pmat_pred[b].shape[0],pmat_gt[b].shape[1]),device=pmat_pred.device)
-        mask[:ns[0][b]+1,:ns[1][b]+1]=1
-        mask[ns[0][b], ns[1][b]]=0
-        acc[b] = torch.sum(pmat_pred[b] * pmat_gt[b] * mask) / torch.sum(pmat_gt[b] * mask)
+        ns0 = int(ns[0][b].item())
+        ns1 = int(ns[1][b].item())
+        n1 = pmat_pred[b].shape[0]
+        n2 = pmat_pred[b].shape[1]
+        row_end = min(ns0, n1 - (1 if n1 == ns0 + 1 else 0))
+        col_end = min(ns1, n2 - (1 if n2 == ns1 + 1 else 0))
+        acc[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt[b, :row_end, :col_end]) / torch.sum(
+            pmat_gt[b, :row_end, :col_end]
+        )
         # acc[b] = torch.sum(pmat_pred[b, :ns[0][b], :ns[1][b]] * pmat_gt[b, :ns[0][b], :ns[1][b]]) / torch.sum(
         #     pmat_gt[b, :ns[0][b], :ns[1][b]])
 
@@ -210,10 +257,15 @@ def matching_precision_varied(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) ->
 
     precision = torch.zeros(batch_num, device=device)
     for b in range(batch_num):
-        mask = torch.zeros((pmat_pred[b].shape[0],pmat_gt[b].shape[1]),device=pmat_pred.device)
-        mask[:ns[0][b]+1,:ns[1][b]+1]=1
-        mask[ns[0][b], ns[1][b]]=0
-        precision[b] = torch.sum(pmat_pred[b] * pmat_gt[b] * mask) / torch.sum(pmat_pred[b] * mask)
+        ns0 = int(ns[0][b].item())
+        ns1 = int(ns[1][b].item())
+        n1 = pmat_pred[b].shape[0]
+        n2 = pmat_pred[b].shape[1]
+        row_end = min(ns0, n1 - (1 if n1 == ns0 + 1 else 0))
+        col_end = min(ns1, n2 - (1 if n2 == ns1 + 1 else 0))
+        precision[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt[b, :row_end, :col_end]) / torch.sum(
+            pmat_pred[b, :row_end, :col_end]
+        )
         # precision[b] = torch.sum(pmat_pred[b, :ns[0][b]+1, :ns[1][b]+1] *
         #                          pmat_gt[b, :ns[0][b]+1, :ns[1][b]+1]) / torch.sum(pmat_pred[b, :ns[0][b]+1, :ns[1][b]+1])
 

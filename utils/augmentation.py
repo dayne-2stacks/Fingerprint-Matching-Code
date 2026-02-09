@@ -124,7 +124,7 @@ def apply_single_transform(image, annotation, transformation_type):
         # Affine jitter: small rotation/translation/scale/shear combined
         # Session-to-session on scanners tends to be mild
         angle = uniform(-15, 15)
-        dx, dy = randint(-20, 20), randint(-20, 20)
+        dx, dy = randint(-150, 150), randint(-150, 150)
         scale = uniform(0.9, 1.1)
         shear_deg = uniform(-5, 5)
         shear = math.tan(math.radians(shear_deg))

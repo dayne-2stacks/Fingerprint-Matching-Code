@@ -14,6 +14,20 @@ from itertools import combinations
 from src.model.ngm import UNIV_SIZE
 
 
+def _pad_perm_mats_with_dustbin(mats, ns_pairs):
+    max_n1 = max(n1 for n1, _ in ns_pairs)
+    max_n2 = max(n2 for _, n2 in ns_pairs)
+    t0 = torch.as_tensor(mats[0])
+    batch = len(mats)
+    out = t0.new_zeros((batch, max_n1 + 1, max_n2 + 1))
+    mask = torch.zeros((batch, max_n1 + 1, max_n2 + 1), dtype=torch.bool)
+    for i, (mat, (n1, n2)) in enumerate(zip(mats, ns_pairs)):
+        t = torch.as_tensor(mat)
+        out[i, :n1 + 1, :n2 + 1] = t[:n1 + 1, :n2 + 1]
+        mask[i, :n1 + 1, :n2 + 1] = True
+    return out, mask
+
+
 def _standardize(image, annotation):
     """Resize to 320x320 and center crop to 240x320."""
     h, w = image.shape[:2]
@@ -44,7 +58,6 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=145
-BATCH_SIZE=8
 DATALOADER_NUM=0
 
 # class GMDataset(Dataset):
@@ -151,12 +164,22 @@ class GMDataset(Dataset):
             img1, ann1 = _standardize(image, annos)
             img2, ann2 = _standardize(image, annos)
 
-        n_common = min(len(ann1), len(ann2))
+        n1, n2 = len(ann1), len(ann2)
+        n_common = min(n1, n2)
         if clip_to_univ and n_common > UNIV_SIZE:
             ann1 = ann1[:UNIV_SIZE]
             ann2 = ann2[:UNIV_SIZE]
-            n_common = UNIV_SIZE
-        perm_mat = np.eye(n_common, dtype=np.float32)
+            n1 = len(ann1)
+            n2 = len(ann2)
+            n_common = min(n1, n2)
+        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+        if n_common > 0:
+            idx = np.arange(n_common)
+            perm_mat[idx, idx] = 1.0
+        if n1 > n_common:
+            perm_mat[n_common:n1, -1] = 1.0
+        if n2 > n_common:
+            perm_mat[-1, n_common:n2] = 1.0
         return (img1, ann1), (img2, ann2), n_common, perm_mat
 
     def _augment_or_standardize_pair_diff(self, img1_orig, ann1_base, img2_orig, ann2_base, clip_to_univ: bool = False):
@@ -180,19 +203,12 @@ class GMDataset(Dataset):
             if len(ann2) > UNIV_SIZE:
                 ann2 = ann2[:UNIV_SIZE]
 
-        # perm_mat = np.zeros(
-        #     (len(ann1)+1, len(ann2)+1),
-        #     dtype=np.float32,
-        # )
-
-        perm_mat = np.zeros(
-            (450, 450),
-            dtype=np.float32,
-        )
-
-        perm_mat[-1, :] = 1.0
-        perm_mat[:, -1] = 1.0
-        perm_mat[-1, -1] = 0.0
+        n1, n2 = len(ann1), len(ann2)
+        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+        if n1 > 0:
+            perm_mat[:n1, -1] = 1.0
+        if n2 > 0:
+            perm_mat[-1, :n2] = 1.0
         
         return (img1, ann1), (img2, ann2), 0, perm_mat
 
@@ -384,10 +400,31 @@ def collate_fn(data: list):
                 ret.append(stack(vs))
         elif type(inp[0]) == dict:
             ret = {}
+            ns_pairs = None
+            if 'gt_perm_mat' in inp[0] and 'ns' in inp[0]:
+                ns_pairs = []
+                for d in inp:
+                    n1, n2 = d['ns']
+                    n1 = int(n1.item()) if isinstance(n1, torch.Tensor) else int(n1)
+                    n2 = int(n2.item()) if isinstance(n2, torch.Tensor) else int(n2)
+                    ns_pairs.append((n1, n2))
             for kvs in zip(*[x.items() for x in inp]):
                 ks, vs = zip(*kvs)
                 for k in ks:
                     assert k == ks[0], "Keys mismatch."
+                k = ks[0]
+                if k == 'gt_perm_mat' and ns_pairs is not None:
+                    has_dustbin = True
+                    for mat, (n1, n2) in zip(vs, ns_pairs):
+                        shape = mat.shape
+                        if shape[0] != n1 + 1 or shape[1] != n2 + 1:
+                            has_dustbin = False
+                            break
+                    if has_dustbin:
+                        padded, mask = _pad_perm_mats_with_dustbin(vs, ns_pairs)
+                        ret[k] = padded
+                        ret['gt_perm_mat_mask'] = mask
+                        continue
                 ret[k] = stack(vs)
         elif type(inp[0]) == torch.Tensor:
             new_t = pad_tensor(inp)
@@ -481,8 +518,8 @@ def worker_init_rand(worker_id):
     np.random.seed(torch.initial_seed() % 2 ** 32)
 
 
-def get_dataloader(dataset, fix_seed=True, shuffle=False):
+def get_dataloader(dataset, batch_size, fix_seed=True, shuffle=False):
     return torch.utils.data.DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=DATALOADER_NUM, collate_fn=collate_fn,
+        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=DATALOADER_NUM, collate_fn=collate_fn,
         pin_memory=False, worker_init_fn=worker_init_fix if fix_seed else worker_init_rand
     )
