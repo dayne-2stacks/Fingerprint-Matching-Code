@@ -9,6 +9,7 @@ from PIL import Image
 import random
 import itertools
 import numpy as np
+import re
 from scipy.sparse import coo_matrix
 from abc import ABC, abstractmethod
 
@@ -32,9 +33,13 @@ class ClassifyPairs:
     """Default classification pairing logic based on class grouping."""
 
     def _finger_id(self, cls_name: str) -> str:
-        """Return the finger id"""
-        # return cls_name.split('_', 1)[1] if '_' in cls_name else cls_name
-        return cls_name
+        """Return a canonical finger id across split/session variants."""
+        fid = str(cls_name)
+        # Remove dataset split/session prefixes (e.g. R1_, R5_, S2_).
+        fid = re.sub(r"^[RrSs]\d+_", "", fid)
+        # Remove augmentation suffixes if present.
+        fid = re.sub(r"_aug_\d+$", "", fid)
+        return fid
 
     def _build_classify_pairs(self):
         """Generate genuine and imposter pairs for the classification task."""
@@ -57,8 +62,18 @@ class ClassifyPairs:
             fid = self._finger_id(cls_name)
             groups[fid].append(img_id)
 
-        # Genuine matches: pair each image with itself so two augmented copies
-        genuine_pairs = [(img_id, img_id) for id_list in groups.values() for img_id in id_list]
+        # Genuine matches: prefer cross-image pairs from the same finger.
+        # Fall back to self-pair only when there is a single sample.
+        genuine_pairs = []
+        for id_list in groups.values():
+            if not id_list:
+                continue
+            # Keep deterministic ordering while removing accidental duplicates.
+            uniq_ids = list(dict.fromkeys(id_list))
+            if len(uniq_ids) >= 2:
+                genuine_pairs.extend(list(itertools.combinations(uniq_ids, 2)))
+            else:
+                genuine_pairs.append((uniq_ids[0], uniq_ids[0]))
 
         if ONLY_GENUINE_PAIRS:
             random.shuffle(genuine_pairs)

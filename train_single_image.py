@@ -32,7 +32,7 @@ image_dataset = GMDataset(
     augment=True,
 )
 
-dataloader = get_dataloader(image_dataset, shuffle=True, fix_seed=True)
+dataloader = get_dataloader(image_dataset, batch_size=8, shuffle=True, fix_seed=True)
 
 model = Net()
 

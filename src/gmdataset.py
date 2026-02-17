@@ -5,6 +5,8 @@ from torchvision import transforms
 import torch_geometric as pyg
 import numpy as np
 import random
+import re
+from collections import defaultdict
 from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
@@ -149,13 +151,61 @@ class GMDataset(Dataset):
             transforms.Normalize(NORM_MEANS, NORM_STD)
         ])
 
-    def _augment_or_standardize_pair_same(self, image, annos, clip_to_univ: bool = False):
-        """Return two views from the same image and filtered annotations.
+    @staticmethod
+    def _canonicalize_label(label):
+        canonical = str(label)
+        # Keep keypoint identity intact; only remove split/session source.
+        # If label encodes image augmentation before a keypoint index
+        # (e.g. "..._aug_2_57"), normalize it to "..._57".
+        canonical = re.sub(r"_aug_\d+_(\d+)$", r"_\1", canonical)
+        canonical = re.sub(r"^[RrSs]\d+_", "", canonical)
+        return canonical
 
-        If augmenting, uses augment_image_pair; otherwise standardizes twice.
-        Returns: (img1, ann1), (img2, ann2), n_common, perm_mat (identity)
-        Optionally clips to UNIV_SIZE.
-        """
+    @classmethod
+    def _build_perm_mat_from_annos(cls, annos1, annos2):
+        n1, n2 = len(annos1), len(annos2)
+        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+
+        label_to_rows = defaultdict(list)
+        label_to_cols = defaultdict(list)
+        for i, (lab, _, _) in enumerate(annos1):
+            canonical = cls._canonicalize_label(lab)
+            if canonical == "outlier":
+                continue
+            label_to_rows[canonical].append(i)
+        for j, (lab, _, _) in enumerate(annos2):
+            canonical = cls._canonicalize_label(lab)
+            if canonical == "outlier":
+                continue
+            label_to_cols[canonical].append(j)
+
+        matched_rows = set()
+        matched_cols = set()
+        for label, rows in label_to_rows.items():
+            cols = label_to_cols.get(label)
+            if not cols:
+                continue
+            pair_count = min(len(rows), len(cols))
+            for k in range(pair_count):
+                i = rows[k]
+                j = cols[k]
+                perm_mat[i, j] = 1.0
+                matched_rows.add(i)
+                matched_cols.add(j)
+
+        if n1 > 0:
+            unmatched_rows = [i for i in range(n1) if i not in matched_rows]
+            if unmatched_rows:
+                perm_mat[unmatched_rows, n2] = 1.0
+        if n2 > 0:
+            unmatched_cols = [j for j in range(n2) if j not in matched_cols]
+            if unmatched_cols:
+                perm_mat[n1, unmatched_cols] = 1.0
+
+        return perm_mat, len(matched_rows)
+
+    def _augment_or_standardize_pair_same(self, image, annos, clip_to_univ: bool = False):
+        """Return two views from the same image and filtered annotations."""
         if self.augment:
             (img1, ann1), (img2, ann2) = augment_image_pair(
                 image, annos, min_points=5, min_common=4, max_attempts=5, n_jobs=2
@@ -164,31 +214,13 @@ class GMDataset(Dataset):
             img1, ann1 = _standardize(image, annos)
             img2, ann2 = _standardize(image, annos)
 
-        n1, n2 = len(ann1), len(ann2)
-        n_common = min(n1, n2)
-        if clip_to_univ and n_common > UNIV_SIZE:
+        if clip_to_univ:
             ann1 = ann1[:UNIV_SIZE]
             ann2 = ann2[:UNIV_SIZE]
-            n1 = len(ann1)
-            n2 = len(ann2)
-            n_common = min(n1, n2)
-        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
-        if n_common > 0:
-            idx = np.arange(n_common)
-            perm_mat[idx, idx] = 1.0
-        if n1 > n_common:
-            perm_mat[n_common:n1, -1] = 1.0
-        if n2 > n_common:
-            perm_mat[-1, n_common:n2] = 1.0
-        return (img1, ann1), (img2, ann2), n_common, perm_mat
+        return (img1, ann1), (img2, ann2)
 
     def _augment_or_standardize_pair_diff(self, img1_orig, ann1_base, img2_orig, ann2_base, clip_to_univ: bool = False):
-        """Return two views from two different images and annotations.
-
-        If augmenting, uses augment_two_images; otherwise standardizes both.
-        Returns: (img1, ann1), (img2, ann2), n_common(=0), perm_mat (zeros)
-        Optionally clips to UNIV_SIZE for each side.
-        """
+        """Return two views from two different images and annotations."""
         if self.augment:
             (img1, ann1), (img2, ann2) = augment_two_images(
                 img1_orig, ann1_base, img2_orig, ann2_base, min_points=5, n_jobs=2
@@ -202,15 +234,7 @@ class GMDataset(Dataset):
                 ann1 = ann1[:UNIV_SIZE]
             if len(ann2) > UNIV_SIZE:
                 ann2 = ann2[:UNIV_SIZE]
-
-        n1, n2 = len(ann1), len(ann2)
-        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
-        if n1 > 0:
-            perm_mat[:n1, -1] = 1.0
-        if n2 > 0:
-            perm_mat[-1, :n2] = 1.0
-        
-        return (img1, ann1), (img2, ann2), 0, perm_mat
+        return (img1, ann1), (img2, ann2)
 
 
     def __len__(self):
@@ -247,8 +271,6 @@ class GMDataset(Dataset):
     def get_pair(self, idx):
         """Return a pair of graphs for classification (genuine/imposter)."""
         pair = self.id_combination[0][idx % self.length]
-        with open("id_combination_dump.txt", "w") as f:
-            f.write(str(self.id_combination))
 
         
         result = self.bm.get_data(list(pair))
@@ -265,28 +287,35 @@ class GMDataset(Dataset):
         fid1 = self.bm._finger_id(cls[1]) if hasattr(self.bm, '_finger_id') else cls[1]
         label = 1 if fid0 == fid1 else 0
 
-        if label:
-            img_path = self.bm.get_path(pair[0])
-            original_img = cv2.imread(img_path)
-            original_annos = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+        img_path1 = self.bm.get_path(pair[0])
+        img_path2 = self.bm.get_path(pair[1])
+        img1_orig = cv2.imread(img_path1)
+        img2_orig = cv2.imread(img_path2)
+        annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
+        annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
+        (img1, annos1_filtered), (img2, annos2_filtered) = self._augment_or_standardize_pair_diff(
+            img1_orig,
+            annos1_base,
+            img2_orig,
+            annos2_base,
+            clip_to_univ=True,
+        )
+        perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered)
 
-            (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
-                self._augment_or_standardize_pair_same(original_img, original_annos, clip_to_univ=True)
-        else:
-            img_path1 = self.bm.get_path(pair[0])
-            img_path2 = self.bm.get_path(pair[1])
-            img1_orig = cv2.imread(img_path1)
-            img2_orig = cv2.imread(img_path2)
-            annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
-            annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
-            # print("Anno", annos1_base, annos2_base)
-            (img1, annos1_filtered), (img2, annos2_filtered), n_common, perm_mat = \
-                self._augment_or_standardize_pair_diff(img1_orig, annos1_base, img2_orig, annos2_base, clip_to_univ=True)
+        # Genuine pairs should carry valid positive correspondences. If random
+        # augmentation removes all overlap, fall back to a same-image dual view.
+        if label == 1 and n_common == 0:
+            (img1, annos1_filtered), (img2, annos2_filtered) = self._augment_or_standardize_pair_same(
+                img1_orig,
+                annos1_base,
+                clip_to_univ=True,
+            )
+            perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered)
 
         
 
-        P1 = np.array([[x, y] for _, x, y in annos1_filtered])
-        P2 = np.array([[x, y] for _, x, y in annos2_filtered])
+        P1 = np.asarray([[x, y] for _, x, y in annos1_filtered], dtype=np.float32).reshape(-1, 2)
+        P2 = np.asarray([[x, y] for _, x, y in annos2_filtered], dtype=np.float32).reshape(-1, 2)
         
         n1, n2 = len(P1), len(P2)
 

@@ -1,7 +1,9 @@
 from pathlib import Path
 import argparse
+import json
 import logging
 import sys
+from typing import Optional
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -52,7 +54,74 @@ def _setup_logging(log_path: Path) -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-def evaluate(dataset_name: str, data_root: str, filter=None):
+def _resolve_decision_threshold(
+    checkpoint_root: Path,
+    cli_auth_threshold: Optional[float],
+    logger: logging.Logger,
+) -> float:
+    if cli_auth_threshold is not None:
+        threshold = float(cli_auth_threshold)
+        logger.info("Using CLI auth threshold: %.4f", threshold)
+        return threshold
+
+    threshold_candidates = [
+        checkpoint_root / "auth_threshold.json",
+        checkpoint_root / "params" / "auth_threshold.json",
+    ]
+    for threshold_file in threshold_candidates:
+        if not threshold_file.exists():
+            continue
+        try:
+            with open(threshold_file, "r") as f:
+                data = json.load(f)
+            threshold = float(data.get("auth_threshold", 0.5))
+            logger.info("Using checkpoint auth threshold from %s: %.4f", threshold_file, threshold)
+            return threshold
+        except Exception as exc:
+            logger.warning("Failed to read %s (%s); trying next fallback.", threshold_file, exc)
+
+    logger.info("Using default auth threshold: 0.5000")
+    return 0.5
+
+
+def _compute_curve_stats(labels: np.ndarray, probs: np.ndarray, logger: logging.Logger):
+    unique_labels = np.unique(labels)
+    if unique_labels.size < 2:
+        logger.warning("Only one class present in labels; ROC/PR/EER metrics are undefined.")
+        return {
+            "fpr": None,
+            "tpr": None,
+            "roc_auc": float("nan"),
+            "prec_curve": None,
+            "rec_curve": None,
+            "pr_auc": float("nan"),
+            "eer_threshold": None,
+            "eer": float("nan"),
+        }
+
+    fpr, tpr, thresholds = roc_curve(labels, probs)
+    fnr = 1 - tpr
+    eer_idx = int(np.nanargmin(np.abs(fnr - fpr)))
+    eer_threshold = float(thresholds[eer_idx])
+    eer = float((fpr[eer_idx] + fnr[eer_idx]) * 0.5)
+
+    roc_auc = float(auc(fpr, tpr))
+    prec_curve, rec_curve, _ = precision_recall_curve(labels, probs)
+    pr_auc = float(auc(rec_curve, prec_curve))
+
+    return {
+        "fpr": fpr,
+        "tpr": tpr,
+        "roc_auc": roc_auc,
+        "prec_curve": prec_curve,
+        "rec_curve": rec_curve,
+        "pr_auc": pr_auc,
+        "eer_threshold": eer_threshold,
+        "eer": eer,
+    }
+
+
+def evaluate(dataset_name: str, data_root: str, filter=None, auth_threshold: Optional[float] = None):
     """Run evaluation using the best classifier model for the chosen dataset.
     """
     dataset_len = None
@@ -94,7 +163,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
         )
     
     # Path to model
-    main_dir = "results/base_joint_ft"
+    main_dir = "results3/dustbin/stage5"
     # Output directory for evaluation results
     out_dir = Path(f"{main_dir}/{dataset_name}")
 
@@ -103,7 +172,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
 
     # Create dataset and dataloader
     dataset = GMDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
-    dataloader = get_dataloader(dataset, batch_size=8, shuffle=True, fix_seed=True)
+    dataloader = get_dataloader(dataset, batch_size=8, shuffle=False, fix_seed=True)
 
     # Load the trained model
     match_net = Net(regression=True)
@@ -122,6 +191,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
     match_net.dustbin_reject_margin = 0.0
     match_net.to(device).eval()
     logger.info("Device: %s", device)
+    decision_threshold = _resolve_decision_threshold(checkpoint_root, auth_threshold, logger)
 
     all_labels = []
     all_probs = []
@@ -195,23 +265,24 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
             logger.info("Batch %d: labels=%s", i, labels)
                 
 
-    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
-    fnr = 1 - tpr
-    eer_idx = np.nanargmin(np.abs(fnr - fpr))
-    eer_threshold = thresholds[eer_idx]
-    preds = (all_probs >= eer_threshold).astype(np.int32)
+    curve_stats = _compute_curve_stats(all_labels, all_probs, logger)
+    fpr = curve_stats["fpr"]
+    tpr = curve_stats["tpr"]
+    roc_auc = curve_stats["roc_auc"]
+    prec_curve = curve_stats["prec_curve"]
+    rec_curve = curve_stats["rec_curve"]
+    pr_auc = curve_stats["pr_auc"]
+    eer_threshold = curve_stats["eer_threshold"]
+    eer = curve_stats["eer"]
+
+    preds = (all_probs >= decision_threshold).astype(np.int32)
 
     accuracy = accuracy_score(all_labels, preds)
-    precision = precision_score(all_labels, preds)
-    recall = recall_score(all_labels, preds)
-    f1 = f1_score(all_labels, preds)
+    precision = precision_score(all_labels, preds, zero_division=0)
+    recall = recall_score(all_labels, preds, zero_division=0)
+    f1 = f1_score(all_labels, preds, zero_division=0)
 
-    roc_auc = auc(fpr, tpr)
-
-    prec_curve, rec_curve, _ = precision_recall_curve(all_labels, all_probs)
-    pr_auc = auc(rec_curve, prec_curve)
-
-    tn, fp, fn, tp = confusion_matrix(all_labels, preds).ravel()
+    tn, fp, fn, tp = confusion_matrix(all_labels, preds, labels=[0, 1]).ravel()
     far = fp / (fp + tn) if (fp + tn) > 0 else 0.0
     frr = fn / (tp + fn) if (tp + fn) > 0 else 0.0
 
@@ -292,7 +363,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
     for i, (label, prob) in enumerate(zip(all_labels, all_probs)):
         if label == 0:
             count = 0
-            for batch in get_dataloader(dataset, batch_size=8, shuffle=True, fix_seed=True):
+            for batch in get_dataloader(dataset, batch_size=8, shuffle=False, fix_seed=True):
                 batch = data_to_cuda(batch)
                 batch_label = batch["label"].cpu().numpy()[0]
                 if batch_label == 0:
@@ -348,26 +419,30 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
                 count += 1
             break
 
-    # ROC curve
-    plt.figure()
-    plt.plot(fpr, tpr, label=f"ROC AUC = {roc_auc:.4f}")
-    plt.plot([0, 1], [0, 1], "--", color="gray")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve")
-    plt.legend(loc="lower right")
-    plt.savefig(out_dir / "roc_curve.png", bbox_inches="tight", pad_inches=0)
-    plt.close()
+    if fpr is not None and tpr is not None:
+        plt.figure()
+        plt.plot(fpr, tpr, label=f"ROC AUC = {roc_auc:.4f}")
+        plt.plot([0, 1], [0, 1], "--", color="gray")
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title("ROC Curve")
+        plt.legend(loc="lower right")
+        plt.savefig(out_dir / "roc_curve.png", bbox_inches="tight", pad_inches=0)
+        plt.close()
+    else:
+        logger.warning("Skipping ROC plot: only one class present.")
 
-    # PR curve
-    plt.figure()
-    plt.plot(rec_curve, prec_curve, label=f"PR AUC = {pr_auc:.4f}")
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.title("Precision-Recall Curve")
-    plt.legend(loc="lower left")
-    plt.savefig(out_dir / "pr_curve.png", bbox_inches="tight", pad_inches=0)
-    plt.close()
+    if rec_curve is not None and prec_curve is not None:
+        plt.figure()
+        plt.plot(rec_curve, prec_curve, label=f"PR AUC = {pr_auc:.4f}")
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title("Precision-Recall Curve")
+        plt.legend(loc="lower left")
+        plt.savefig(out_dir / "pr_curve.png", bbox_inches="tight", pad_inches=0)
+        plt.close()
+    else:
+        logger.warning("Skipping PR plot: only one class present.")
 
     # Concatenate raw k values
     all_raw_k = torch.cat(all_raw_k).numpy()
@@ -387,8 +462,9 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
     plt.ylabel('Frequency')
     plt.title('Distribution of Normalized k Values')
     plt.grid(alpha=0.3)
-    plt.axvline(x=eer_threshold, color='black', linestyle='--', 
-               label=f'EER Threshold ({eer_threshold:.3f})')
+    if eer_threshold is not None:
+        plt.axvline(x=eer_threshold, color='black', linestyle='--',
+                    label=f'EER Threshold ({eer_threshold:.3f})')
     plt.legend()
     plt.savefig(out_dir / "normalized_k_histogram.png", bbox_inches="tight", pad_inches=0)
     plt.close()
@@ -420,6 +496,9 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
         "f1_score": f1,
         "roc_auc": roc_auc,
         "pr_auc": pr_auc,
+        "eer": eer,
+        "eer_threshold": eer_threshold if eer_threshold is not None else float("nan"),
+        "decision_threshold": float(decision_threshold),
         "far": far,
         "frr": frr,
     }
@@ -520,6 +599,12 @@ if __name__ == "__main__":
         default="none",
         help="Keypoint filter strategy. Use 'none' to keep all keypoints.",
     )
+    parser.add_argument(
+        "--auth-threshold",
+        type=float,
+        default=None,
+        help="Optional fixed authentication threshold. Overrides checkpoint/default threshold selection.",
+    )
     args = parser.parse_args()
 
     if args.data_root is None:
@@ -538,4 +623,4 @@ if __name__ == "__main__":
     if filter_value == "none":
         filter_value = None
 
-    evaluate(args.dataset, data_root, filter=filter_value)
+    evaluate(args.dataset, data_root, filter=filter_value, auth_threshold=args.auth_threshold)

@@ -15,7 +15,16 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from src.train.data_loader import build_dataloaders
 from src.train.training_loop import train_epoch
 from src.train.evaluation import validate_epoch, test_evaluation
-from src.model.ngm import Net
+from src.model.ngm import (
+    Net,
+    K_GATE_TEMP,
+    K_GATE_LOSS_WEIGHT,
+    K_GATE_LEARN_STAGE_MIN,
+    AUTH_GATE_TEMP,
+    AUTH_GATE_LOSS_WEIGHT,
+    DUSTBIN_MARGIN_TEMP,
+    DUSTBIN_MARGIN_LOSS_WEIGHT,
+)
 from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
 from src.loss_func import PermutationLoss, PermutationLossHung, FocalLoss
@@ -50,128 +59,408 @@ def _stage_from_filename(name: str) -> int:
         return 3
     if "stage4" in name:
         return 4
+    if "stage5" in name:
+        return 5
     return 0
 
 
-STAGE_DEFAULTS = {
+def _ramp_value(ramp_cfg, progress, default_value):
+    if not isinstance(ramp_cfg, dict):
+        return float(default_value)
+    start = float(ramp_cfg.get("start", default_value))
+    end = float(ramp_cfg.get("end", default_value))
+    p = max(0.0, min(1.0, float(progress)))
+    return start + (end - start) * p
+
+
+def _collect_param_groups(model):
+    groups = {
+        "matcher": [],
+        "backbone_node": [],
+        "backbone_edge": [],
+        "k_head": [],
+        "auth_head": [],
+        "dustbin": [],
+    }
+
+    for name, param in model.named_parameters():
+        if name.startswith(("encoder_k.", "final_row.", "final_col.")):
+            groups["k_head"].append(param)
+        elif name.startswith(("auth_head.", "auth_pool_proj.")):
+            groups["auth_head"].append(param)
+        elif name == "bin_score":
+            groups["dustbin"].append(param)
+        elif name.startswith("node_layers."):
+            groups["backbone_node"].append(param)
+        elif name.startswith(("edge_layers.", "final_layers.")):
+            groups["backbone_edge"].append(param)
+        else:
+            groups["matcher"].append(param)
+
+    return groups
+
+
+def _set_trainable(params, enabled):
+    for p in params:
+        p.requires_grad = bool(enabled)
+
+
+def _configure_stage_trainability(model, stage):
+    groups = _collect_param_groups(model)
+
+    for _, param in model.named_parameters():
+        param.requires_grad = False
+
+    if stage == 1:
+        # Stage 1: train shared matcher baseline (matcher + backbone), keep k/auth/dustbin frozen.
+        _set_trainable(groups["matcher"], True)
+        _set_trainable(groups["backbone_node"], True)
+        _set_trainable(groups["backbone_edge"], True)
+    elif stage == 2:
+        # Stage 2: keep matcher stable; train K + auth heads.
+        _set_trainable(groups["k_head"], True)
+        _set_trainable(groups["auth_head"], True)
+    elif stage == 3:
+        # Stage 3: joint training for matcher/backbone/k/auth.
+        _set_trainable(groups["matcher"], True)
+        _set_trainable(groups["k_head"], True)
+        _set_trainable(groups["auth_head"], True)
+        _set_trainable(groups["backbone_node"], True)
+        _set_trainable(groups["backbone_edge"], True)
+    elif stage == 4:
+        # Stage 4: dustbin + auth warmup using shared matcher from stage1.
+        _set_trainable(groups["dustbin"], True)
+        _set_trainable(groups["auth_head"], True)
+    elif stage == 5:
+        # Stage 5: joint matcher/backbone/dustbin/auth while K stays frozen.
+        _set_trainable(groups["matcher"], True)
+        _set_trainable(groups["auth_head"], True)
+        _set_trainable(groups["backbone_node"], True)
+        _set_trainable(groups["backbone_edge"], True)
+        _set_trainable(groups["dustbin"], True)
+    else:
+        # Fallback: full fine-tuning.
+        for _, param in model.named_parameters():
+            param.requires_grad = True
+
+    return groups
+
+
+def _build_optimizers(model, groups, lr, backbone_lr, k_lr):
+    k_params = [p for p in groups["k_head"] if p.requires_grad]
+    k_ids = {id(p) for p in k_params}
+
+    backbone_params = [
+        p
+        for p in (groups["backbone_node"] + groups["backbone_edge"])
+        if p.requires_grad and id(p) not in k_ids
+    ]
+    backbone_ids = {id(p) for p in backbone_params}
+
+    main_params = [
+        p
+        for p in model.parameters()
+        if p.requires_grad and id(p) not in k_ids and id(p) not in backbone_ids
+    ]
+
+    model_param_groups = []
+    if main_params:
+        model_param_groups.append(
+            {"params": main_params, "lr": float(lr), "base_lr": float(lr), "name": "main"}
+        )
+    if backbone_params:
+        model_param_groups.append(
+            {
+                "params": backbone_params,
+                "lr": float(backbone_lr),
+                "base_lr": float(backbone_lr),
+                "name": "backbone",
+            }
+        )
+
+    if not model_param_groups:
+        raise RuntimeError("No trainable parameters were selected for the main optimizer.")
+
+    optimizer = optim.AdamW(model_param_groups, lr=float(lr), weight_decay=1e-4)
+    optimizer_k = None
+    if k_params:
+        optimizer_k = optim.AdamW(
+            [{"params": k_params, "lr": float(k_lr), "base_lr": float(k_lr), "name": "k_head"}],
+            lr=float(k_lr),
+            weight_decay=1e-6,
+        )
+
+    return optimizer, optimizer_k
+
+
+STAGE_RUNTIME_DEFAULTS = {
     1: {
         "LR": 1e-4,
-        "K_LR": 2e-3,
+        "K_LR": 5e-4,
         "BACKBONE_LR": 1e-5,
         "LR_DECAY": 0.5,
-        "patience": 15,
-        "num_epochs": 50,
+        "patience": 12,
+        "num_epochs": 40,
         "num_iterations": 50,
         "BATCH_SIZE": 8,
+        "WARMUP_EPOCHS": 3,
+        "WARMUP_K_EPOCHS": 2,
+    },
+    2: {
+        "LR": 8e-5,
+        "K_LR": 3e-4,
+        "BACKBONE_LR": 2e-5,
+        "LR_DECAY": 0.5,
+        "patience": 20,
+        "num_epochs": 30,
+        "num_iterations": 50,
+        "BATCH_SIZE": 8,
+        "WARMUP_EPOCHS": 3,
+        "WARMUP_K_EPOCHS": 2,
+    },
+    3: {
+        "LR": 5e-5,
+        "K_LR": 2e-4,
+        "BACKBONE_LR": 1e-5,
+        "LR_DECAY": 0.5,
+        "patience": 8,
+        "num_epochs": 30,
+        "num_iterations": 40,
+        "BATCH_SIZE": 8,
+        "WARMUP_EPOCHS": 3,
+        "WARMUP_K_EPOCHS": 2,
+    },
+    4: {
+        "LR": 2e-5,
+        "K_LR": 1e-4,
+        "BACKBONE_LR": 5e-6,
+        "LR_DECAY": 0.5,
+        "patience": 8,
+        "num_epochs": 25,
+        "num_iterations": 40,
+        "BATCH_SIZE": 8,
+        "WARMUP_EPOCHS": 3,
+        "WARMUP_K_EPOCHS": 2,
+    },
+    5: {
+        "LR": 2e-5,
+        "K_LR": 1e-4,
+        "BACKBONE_LR": 5e-6,
+        "LR_DECAY": 0.5,
+        "patience": 8,
+        "num_epochs": 25,
+        "num_iterations": 40,
+        "BATCH_SIZE": 8,
+        "WARMUP_EPOCHS": 3,
+        "WARMUP_K_EPOCHS": 2,
+    },
+}
+
+STAGE_POLICY = {
+    1: {
+        "MATCH_BRANCH": "shared_matcher",
+        "REGRESSION": False,
+        "TRAIN_USE_PRED_K": False,
         "PERM_LOSS": "focal",
         "FOCAL_GAMMA": 2.0,
         "K_REG_WEIGHT": 0.2,
         "K_CLS_WEIGHT": 0.0,
+        "K_CLS_RAMP": None,
         "DUSTBIN_LOSS_WEIGHT": 0.5,
         "SG_DUSTBIN_WEIGHT": 0.0,
         "SG_DUSTBIN_RAMP": None,
         "DUSTBIN_REJECT_ENABLE": False,
         "DUSTBIN_REJECT_MARGIN": 0.0,
         "AUTH_WEIGHT": 0.0,
+        "AUTH_WEIGHT_RAMP": None,
         "K_GATE_ENABLE": False,
         "K_GATE_THRESH": 0.2,
         "K_MATCH_ROUNDING": "round",
         "AUTH_GATE_ENABLE": False,
         "AUTH_GATE_THRESH": 0.5,
-        "WARMUP_EPOCHS": 5,
-        "WARMUP_K_EPOCHS": 3,
+        "AUTH_USE_POOLED": True,
+        "AUTH_SCALAR_DIM": 6,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": 2,
         "DETECT_ANOMALY": False,
     },
     2: {
-        "LR": 1e-20,
-        "K_LR": 1e-6,
-        "BACKBONE_LR": 1e-20,
-        "LR_DECAY": 0.1,
-        "patience": 10,
-        "num_epochs": 1,
-        "num_iterations": 25,
-        "BATCH_SIZE": 8,
+        "MATCH_BRANCH": "topk",
+        "REGRESSION": True,
+        "TRAIN_USE_PRED_K": False,
         "PERM_LOSS": "focal",
         "FOCAL_GAMMA": 2.0,
         "K_REG_WEIGHT": 0.2,
-        "K_CLS_WEIGHT": 0.0,
+        "K_CLS_WEIGHT": 0.05,
+        "K_CLS_RAMP": {"start": 0.0, "end": 0.05},
         "DUSTBIN_LOSS_WEIGHT": 0.5,
         "SG_DUSTBIN_WEIGHT": 0.0,
         "SG_DUSTBIN_RAMP": None,
         "DUSTBIN_REJECT_ENABLE": False,
         "DUSTBIN_REJECT_MARGIN": 0.0,
-        "AUTH_WEIGHT": 0.0,
+        "AUTH_WEIGHT": 0.2,
+        "AUTH_WEIGHT_RAMP": {"start": 0.05, "end": 0.2},
         "K_GATE_ENABLE": False,
         "K_GATE_THRESH": 0.2,
         "K_MATCH_ROUNDING": "round",
         "AUTH_GATE_ENABLE": False,
         "AUTH_GATE_THRESH": 0.5,
-        "WARMUP_EPOCHS": 5,
-        "WARMUP_K_EPOCHS": 3,
+        "AUTH_USE_POOLED": True,
+        "AUTH_SCALAR_DIM": 6,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": 2,
         "DETECT_ANOMALY": False,
     },
     3: {
-        "LR": 1e-4,
-        "K_LR": 1e-4,
-        "BACKBONE_LR": 1e-20,
-        "LR_DECAY": 0.5,
-        "patience": 5,
-        "num_epochs": 20,
-        "num_iterations": 25,
-        "BATCH_SIZE": 8,
+        "MATCH_BRANCH": "topk",
+        "REGRESSION": True,
+        "TRAIN_USE_PRED_K": True,
         "PERM_LOSS": "focal",
         "FOCAL_GAMMA": 2.0,
         "K_REG_WEIGHT": 0.2,
-        "K_CLS_WEIGHT": 0.0,
+        "K_CLS_WEIGHT": 0.1,
+        "K_CLS_RAMP": {"start": 0.05, "end": 0.1},
         "DUSTBIN_LOSS_WEIGHT": 0.5,
         "SG_DUSTBIN_WEIGHT": 1.0,
         "SG_DUSTBIN_RAMP": {"start": 0.1, "end": 1.0},
-        "DUSTBIN_REJECT_ENABLE": True,
+        "DUSTBIN_REJECT_ENABLE": False,
         "DUSTBIN_REJECT_MARGIN": 0.0,
-        "AUTH_WEIGHT": 0.0,
+        "AUTH_WEIGHT": 0.5,
+        "AUTH_WEIGHT_RAMP": {"start": 0.2, "end": 0.5},
         "K_GATE_ENABLE": False,
         "K_GATE_THRESH": 0.2,
         "K_MATCH_ROUNDING": "round",
         "AUTH_GATE_ENABLE": False,
         "AUTH_GATE_THRESH": 0.5,
-        "WARMUP_EPOCHS": 5,
-        "WARMUP_K_EPOCHS": 3,
+        "AUTH_USE_POOLED": True,
+        "AUTH_SCALAR_DIM": 6,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": 2,
         "DETECT_ANOMALY": False,
     },
     4: {
-        "LR": 1e-5,
-        "K_LR": 1e-4,
-        "BACKBONE_LR": 1e-6,
-        "LR_DECAY": 0.5,
-        "patience": 5,
-        "num_epochs": 20,
-        "num_iterations": 25,
-        "BATCH_SIZE": 8,
+        "MATCH_BRANCH": "dustbin",
+        "REGRESSION": True,
+        "TRAIN_USE_PRED_K": False,
         "PERM_LOSS": "focal",
         "FOCAL_GAMMA": 2.0,
         "K_REG_WEIGHT": 0.2,
         "K_CLS_WEIGHT": 0.0,
+        "K_CLS_RAMP": None,
         "DUSTBIN_LOSS_WEIGHT": 0.5,
         "SG_DUSTBIN_WEIGHT": 1.0,
         "SG_DUSTBIN_RAMP": None,
         "DUSTBIN_REJECT_ENABLE": True,
         "DUSTBIN_REJECT_MARGIN": 0.0,
         "AUTH_WEIGHT": 1.0,
-        "K_GATE_ENABLE": True,
+        "AUTH_WEIGHT_RAMP": {"start": 0.2, "end": 1.0},
+        "K_GATE_ENABLE": False,
         "K_GATE_THRESH": 0.2,
         "K_MATCH_ROUNDING": "round",
         "AUTH_GATE_ENABLE": True,
         "AUTH_GATE_THRESH": 0.5,
-        "WARMUP_EPOCHS": 5,
-        "WARMUP_K_EPOCHS": 3,
+        "AUTH_USE_POOLED": True,
+        "AUTH_SCALAR_DIM": 6,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": 2,
+        "DETECT_ANOMALY": False,
+    },
+    5: {
+        "MATCH_BRANCH": "dustbin",
+        "REGRESSION": True,
+        "TRAIN_USE_PRED_K": False,
+        "PERM_LOSS": "focal",
+        "FOCAL_GAMMA": 2.0,
+        "K_REG_WEIGHT": 0.2,
+        "K_CLS_WEIGHT": 0.0,
+        "K_CLS_RAMP": None,
+        "DUSTBIN_LOSS_WEIGHT": 0.5,
+        "SG_DUSTBIN_WEIGHT": 1.0,
+        "SG_DUSTBIN_RAMP": None,
+        "DUSTBIN_REJECT_ENABLE": True,
+        "DUSTBIN_REJECT_MARGIN": 0.0,
+        "AUTH_WEIGHT": 1.0,
+        "AUTH_WEIGHT_RAMP": {"start": 0.2, "end": 1.0},
+        "K_GATE_ENABLE": False,
+        "K_GATE_THRESH": 0.2,
+        "K_MATCH_ROUNDING": "round",
+        "AUTH_GATE_ENABLE": True,
+        "AUTH_GATE_THRESH": 0.5,
+        "AUTH_USE_POOLED": True,
+        "AUTH_SCALAR_DIM": 6,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": 2,
         "DETECT_ANOMALY": False,
     },
 }
-config_files = ["stage2.yml", "stage3.yml", "stage4.yml"]
+
+TRAIN_CONFIG_KEYS_USED = {
+    "OUTPUT_PATH",
+    "MODEL_PATH",
+    "PRETRAINED_PATH",
+    "CHECKPOINT_PATH",
+    "LOG_DIR",
+    "start_epoch",
+    "num_iterations",
+    "num_epochs",
+    "BATCH_SIZE",
+    "BM_NAME",
+    "FILTER",
+    "LR",
+    "BACKBONE_LR",
+    "K_LR",
+    "WARMUP_EPOCHS",
+    "WARMUP_K_EPOCHS",
+    "OVERFIT_TO_TRAIN_SPLIT",
+}
+NGM_CONFIG_KEYS_USED = set()
+
+
+def _resolve_stage_runtime_defaults(stage):
+    return dict(STAGE_RUNTIME_DEFAULTS.get(stage, STAGE_RUNTIME_DEFAULTS[1]))
+
+
+def _resolve_stage_policy(stage):
+    return dict(STAGE_POLICY.get(stage, STAGE_POLICY[1]))
+
+
+def _default_pretrained_path(stage_output_paths, stage):
+    chain = {
+        2: 1,
+        3: 2,
+        4: 1,
+        5: 4,
+    }
+    source_stage = chain.get(int(stage))
+    if source_stage is None:
+        return ""
+    source_output_path = stage_output_paths.get(int(source_stage), "")
+    if not source_output_path:
+        return ""
+    return str(Path(source_output_path) / "params" / "best_model.pt")
+
+
+def _get_ignored_config_keys(train_config, ngm_config):
+    ignored_train = sorted(k for k in train_config.keys() if k not in TRAIN_CONFIG_KEYS_USED)
+    ignored_ngm = sorted(k for k in ngm_config.keys() if k not in NGM_CONFIG_KEYS_USED)
+    return ignored_train, ignored_ngm
+
+
+def _collect_stage_output_paths(config_file_list):
+    stage_output_paths = {}
+    for cfg_file in config_file_list:
+        stage = _stage_from_filename(cfg_file)
+        if stage <= 0:
+            continue
+        with open(cfg_file, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+        train_cfg = cfg.get("train", {})
+        output_path = train_cfg.get("OUTPUT_PATH", train_cfg.get("MODEL_PATH", "results/binary-classifier"))
+        stage_output_paths[int(stage)] = output_path
+    return stage_output_paths
+
+
+# config_files = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml", "stage5.yml"]
 # config_files = ["stage1.yml", "stage2.yml", "stage3.yml"]
 # config_files = ["stage4.yml"]
-# config_files = [ "stage2.yml"]
+config_files = [ "stage2.yml"]
 # config_files = [ "stage4.yml"]
+stage_output_paths = _collect_stage_output_paths(config_files)
 
 
 for file in config_files:
@@ -186,19 +475,26 @@ for file in config_files:
 
     train_config = config["train"]
     stage = _stage_from_filename(file)
-    defaults = STAGE_DEFAULTS.get(stage, STAGE_DEFAULTS[1])
+    runtime_defaults = _resolve_stage_runtime_defaults(stage)
+    stage_policy = _resolve_stage_policy(stage)
+    match_branch = str(stage_policy.get("MATCH_BRANCH", "shared_matcher")).strip().lower()
+    stage_name = f"stage{stage}"
+    ngm_config = config.get("ngm", {})
 
     OUTPUT_PATH = train_config.get("OUTPUT_PATH", train_config.get("MODEL_PATH", "results/binary-classifier"))
+    stage_output_paths[int(stage)] = OUTPUT_PATH
     PRETRAINED_PATH = train_config.get("PRETRAINED_PATH", "")
     CHECKPOINT_PATH = train_config.get("CHECKPOINT_PATH", "checkpoints")
-    checkpoint_root = Path(CHECKPOINT_PATH)
+    checkpoint_root = Path(CHECKPOINT_PATH) / match_branch / stage_name
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     start_file = checkpoint_root / "checkpoint.json"
-    log_dir = Path(train_config.get("LOG_DIR", "logs/tensorboard"))
+    log_dir = Path(train_config.get("LOG_DIR", "logs/tensorboard")) / match_branch / stage_name
     log_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = Path(OUTPUT_PATH) / "params"
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
 
     # Create a new writer for this training stage
-    writer = SummaryWriter(log_dir=str(log_dir / file.split('.')[0]))
+    writer = SummaryWriter(log_dir=str(log_dir))
     
     # Hyperparameters from config
     if os.path.exists(start_file):
@@ -209,35 +505,50 @@ for file in config_files:
     else:
         start_epoch = train_config.get("start_epoch", 0)
 
-    num_iterations = train_config.get("num_iterations", defaults["num_iterations"])
-    num_epochs = train_config.get("num_epochs", defaults["num_epochs"])
-    BATCH_SIZE = train_config.get("BATCH_SIZE", defaults["BATCH_SIZE"])
+    num_iterations = train_config.get("num_iterations", runtime_defaults["num_iterations"])
+    num_epochs = train_config.get("num_epochs", runtime_defaults["num_epochs"])
+    BATCH_SIZE = train_config.get("BATCH_SIZE", runtime_defaults["BATCH_SIZE"])
     BM_NAME = train_config.get("BM_NAME", "L3SFV2AugmentedBenchmark")
     FILTER = train_config.get("FILTER", None)
-    LR = train_config.get("LR", defaults["LR"])
-    BACKBONE_LR = defaults["BACKBONE_LR"]
-    K_LR = train_config.get("K_LR", defaults["K_LR"])
-    SG_DUSTBIN_WEIGHT = defaults["SG_DUSTBIN_WEIGHT"]
-    SG_DUSTBIN_RAMP = defaults["SG_DUSTBIN_RAMP"]
-    DUSTBIN_REJECT_ENABLE = defaults["DUSTBIN_REJECT_ENABLE"]
-    DUSTBIN_REJECT_MARGIN = defaults["DUSTBIN_REJECT_MARGIN"]
-    LR_DECAY = defaults["LR_DECAY"]
-    patience = defaults["patience"]
-    ngm_config = config.get("ngm", {})
-    REGRESSION = ngm_config.get("REGRESSION", stage != 1)
-    TRAIN_USE_PRED_K = ngm_config.get("TRAIN_USE_PRED_K", stage == 4)
-    PERM_LOSS = defaults["PERM_LOSS"]
-    FOCAL_GAMMA = defaults["FOCAL_GAMMA"]
-    K_REG_WEIGHT = defaults["K_REG_WEIGHT"]
-    K_CLS_WEIGHT = defaults["K_CLS_WEIGHT"]
-    DUSTBIN_LOSS_WEIGHT = defaults["DUSTBIN_LOSS_WEIGHT"]
-    AUTH_WEIGHT = defaults["AUTH_WEIGHT"]
-    K_GATE_ENABLE = defaults["K_GATE_ENABLE"]
-    K_GATE_THRESH = defaults["K_GATE_THRESH"]
-    K_MATCH_ROUNDING = defaults["K_MATCH_ROUNDING"]
-    AUTH_GATE_ENABLE = defaults["AUTH_GATE_ENABLE"]
-    AUTH_GATE_THRESH = defaults["AUTH_GATE_THRESH"]
-    DETECT_ANOMALY = defaults["DETECT_ANOMALY"]
+    OVERFIT_TO_TRAIN_SPLIT = bool(train_config.get("OVERFIT_TO_TRAIN_SPLIT", False))
+    LR = train_config.get("LR", runtime_defaults["LR"])
+    BACKBONE_LR = train_config.get("BACKBONE_LR", runtime_defaults["BACKBONE_LR"])
+    K_LR = train_config.get("K_LR", runtime_defaults["K_LR"])
+    LR_DECAY = runtime_defaults["LR_DECAY"]
+    patience = runtime_defaults["patience"]
+
+    WARMUP_EPOCHS = train_config.get("WARMUP_EPOCHS", runtime_defaults["WARMUP_EPOCHS"])
+    WARMUP_K_EPOCHS = train_config.get("WARMUP_K_EPOCHS", runtime_defaults["WARMUP_K_EPOCHS"])
+
+    REGRESSION = stage_policy["REGRESSION"]
+    TRAIN_USE_PRED_K = stage_policy["TRAIN_USE_PRED_K"]
+    PERM_LOSS = stage_policy["PERM_LOSS"]
+    FOCAL_GAMMA = stage_policy["FOCAL_GAMMA"]
+    K_REG_WEIGHT = stage_policy["K_REG_WEIGHT"]
+    K_CLS_WEIGHT = stage_policy["K_CLS_WEIGHT"]
+    K_CLS_RAMP = stage_policy["K_CLS_RAMP"]
+    DUSTBIN_LOSS_WEIGHT = stage_policy["DUSTBIN_LOSS_WEIGHT"]
+    SG_DUSTBIN_WEIGHT = stage_policy["SG_DUSTBIN_WEIGHT"]
+    SG_DUSTBIN_RAMP = stage_policy["SG_DUSTBIN_RAMP"]
+    DUSTBIN_REJECT_ENABLE = stage_policy["DUSTBIN_REJECT_ENABLE"]
+    DUSTBIN_REJECT_MARGIN = stage_policy["DUSTBIN_REJECT_MARGIN"]
+    AUTH_WEIGHT = stage_policy["AUTH_WEIGHT"]
+    AUTH_WEIGHT_RAMP = stage_policy["AUTH_WEIGHT_RAMP"]
+    K_GATE_ENABLE = stage_policy["K_GATE_ENABLE"]
+    K_GATE_THRESH = stage_policy["K_GATE_THRESH"]
+    K_MATCH_ROUNDING = stage_policy["K_MATCH_ROUNDING"]
+    AUTH_GATE_ENABLE = stage_policy["AUTH_GATE_ENABLE"]
+    AUTH_GATE_THRESH = stage_policy["AUTH_GATE_THRESH"]
+    AUTH_USE_POOLED = stage_policy["AUTH_USE_POOLED"]
+    AUTH_SCALAR_DIM = stage_policy["AUTH_SCALAR_DIM"]
+    K_MATCH_DETACH_STAGE_THRESHOLD = stage_policy["K_MATCH_DETACH_STAGE_THRESHOLD"]
+    DETECT_ANOMALY = stage_policy["DETECT_ANOMALY"]
+
+    ignored_train_keys, ignored_ngm_keys = _get_ignored_config_keys(train_config, ngm_config)
+    if ignored_train_keys:
+        print(f"[Stage {stage}] Ignoring train config keys: {ignored_train_keys}")
+    if ignored_ngm_keys:
+        print(f"[Stage {stage}] Ignoring ngm config keys: {ignored_ngm_keys}")
 
     print("BACKBONE_LR =", BACKBONE_LR)
     print("Start epoch: ", start_epoch)
@@ -248,9 +559,11 @@ for file in config_files:
         "num_iterations": num_iterations,
         "BATCH_SIZE": BATCH_SIZE,
         "BM_NAME": BM_NAME,
+        "OVERFIT_TO_TRAIN_SPLIT": OVERFIT_TO_TRAIN_SPLIT,
         "OUTPUT_PATH": OUTPUT_PATH,
         "PRETRAINED_PATH": PRETRAINED_PATH,
         "CHECKPOINT_PATH": CHECKPOINT_PATH,
+        "MATCH_BRANCH": match_branch,
         "REGRESSION": REGRESSION,
         "TRAIN_USE_PRED_K": TRAIN_USE_PRED_K,
     }
@@ -262,20 +575,38 @@ for file in config_files:
         "FOCAL_GAMMA": FOCAL_GAMMA,
         "K_REG_WEIGHT": K_REG_WEIGHT,
         "K_CLS_WEIGHT": K_CLS_WEIGHT,
+        "K_CLS_RAMP": K_CLS_RAMP,
         "DUSTBIN_LOSS_WEIGHT": DUSTBIN_LOSS_WEIGHT,
         "SG_DUSTBIN_WEIGHT": SG_DUSTBIN_WEIGHT,
         "SG_DUSTBIN_RAMP": SG_DUSTBIN_RAMP,
         "DUSTBIN_REJECT_ENABLE": DUSTBIN_REJECT_ENABLE,
         "DUSTBIN_REJECT_MARGIN": DUSTBIN_REJECT_MARGIN,
         "AUTH_WEIGHT": AUTH_WEIGHT,
+        "AUTH_WEIGHT_RAMP": AUTH_WEIGHT_RAMP,
+        "AUTH_USE_POOLED": AUTH_USE_POOLED,
+        "AUTH_SCALAR_DIM": AUTH_SCALAR_DIM,
+        "K_MATCH_DETACH_STAGE_THRESHOLD": K_MATCH_DETACH_STAGE_THRESHOLD,
         "K_GATE_ENABLE": K_GATE_ENABLE,
         "K_GATE_THRESH": K_GATE_THRESH,
         "K_MATCH_ROUNDING": K_MATCH_ROUNDING,
         "AUTH_GATE_ENABLE": AUTH_GATE_ENABLE,
         "AUTH_GATE_THRESH": AUTH_GATE_THRESH,
-        "WARMUP_EPOCHS": defaults["WARMUP_EPOCHS"],
-        "WARMUP_K_EPOCHS": defaults["WARMUP_K_EPOCHS"],
+        "MATCH_BRANCH": match_branch,
+        "WARMUP_EPOCHS": WARMUP_EPOCHS,
+        "WARMUP_K_EPOCHS": WARMUP_K_EPOCHS,
         "DETECT_ANOMALY": DETECT_ANOMALY,
+        "K_GATE_THRESH_INIT": K_GATE_THRESH,
+        "AUTH_GATE_THRESH_INIT": AUTH_GATE_THRESH,
+        "DUSTBIN_REJECT_MARGIN_INIT": DUSTBIN_REJECT_MARGIN,
+        "K_GATE_TEMP(HARDCODED)": K_GATE_TEMP,
+        "K_GATE_LOSS_WEIGHT(HARDCODED)": K_GATE_LOSS_WEIGHT,
+        "K_GATE_LEARN_STAGE_MIN(HARDCODED)": K_GATE_LEARN_STAGE_MIN,
+        "AUTH_GATE_TEMP(HARDCODED)": AUTH_GATE_TEMP,
+        "AUTH_GATE_LOSS_WEIGHT(HARDCODED)": AUTH_GATE_LOSS_WEIGHT,
+        "DUSTBIN_MARGIN_TEMP(HARDCODED)": DUSTBIN_MARGIN_TEMP,
+        "DUSTBIN_MARGIN_LOSS_WEIGHT(HARDCODED)": DUSTBIN_MARGIN_LOSS_WEIGHT,
+        "IGNORED_TRAIN_KEYS": ignored_train_keys,
+        "IGNORED_NGM_KEYS": ignored_ngm_keys,
     }
     print(f"[Stage {stage}] config={minimal_cfg} defaults={derived_cfg}")
     
@@ -319,6 +650,7 @@ for file in config_files:
         batch_size=BATCH_SIZE,
         benchmark_name=BM_NAME,
         filter=FILTER,
+        overfit_to_train_split=OVERFIT_TO_TRAIN_SPLIT,
     )
     # =====================================================
     # Model, Loss, and Device Setup
@@ -328,15 +660,8 @@ for file in config_files:
         k_reg_weight=K_REG_WEIGHT,
         k_cls_weight=K_CLS_WEIGHT,
         dustbin_loss_weight=DUSTBIN_LOSS_WEIGHT,
-        k_gate_enable=K_GATE_ENABLE,
-        k_gate_thresh=K_GATE_THRESH,
-        k_match_rounding=K_MATCH_ROUNDING,
-        auth_gate_enable=AUTH_GATE_ENABLE,
-        auth_gate_thresh=AUTH_GATE_THRESH,
     )
-    model.dustbin_reject_enable = bool(DUSTBIN_REJECT_ENABLE)
-    model.dustbin_reject_margin = float(DUSTBIN_REJECT_MARGIN)
-    model.train_use_pred_k = bool(TRAIN_USE_PRED_K)
+    model.apply_stage_policy(stage_policy)
     model.train_stage = int(stage) if stage is not None else None
     perm_loss_key = str(PERM_LOSS).strip().lower()
     if perm_loss_key == "focal":
@@ -354,91 +679,23 @@ for file in config_files:
 
 
     # =====================================================
-    # Freeze / Unfreeze Layers Based on Stage
+    # Stage-wise progressive unfreezing
     # =====================================================
+    stage_param_groups = _configure_stage_trainability(model, stage)
+    optimizer, optimizer_k = _build_optimizers(model, stage_param_groups, LR, BACKBONE_LR, K_LR)
 
-    backbone_ids = [id(item) for item in model.backbone_params]
-    k_params = model.k_params_id
-    dustbin_params = [model.bin_score]
-    dustbin_ids = {id(param) for param in dustbin_params}
-    other_params = [
-        param for param in model.parameters()
-        if id(param) not in k_params
-        and id(param) not in backbone_ids
-        and id(param) not in dustbin_ids
-    ]
-    
-    model_params = [
-        {'params': other_params},
-        {'params': model.backbone_params, 'lr': BACKBONE_LR},
-        {'params': dustbin_params},
-        ]
-    
-    # -----------------------------------------------------
-    # Determine training stage from config filename
-    # -----------------------------------------------------
-    if stage == 1:
-        print("Stage 1: Freezing all layers in k_params and training other parameters.")
-        # Freeze k_params
-        # for param in model.k_params:
-        #     for p in param["params"]:
-        #         p.requires_grad = False
+    stage_messages = {
+        1: "Stage 1: train shared matcher baseline (matcher/backbone active; k/auth/dustbin frozen).",
+        2: "Stage 2: train K + auth heads while matcher/backbone stay mostly frozen.",
+        3: "Stage 3: joint top-k training with matcher/backbone/k/auth active.",
+        4: "Stage 4: dustbin+auth warmup (matcher/backbone/K frozen).",
+        5: "Stage 5: joint dustbin training with matcher/backbone/dustbin/auth active.",
+    }
+    print(stage_messages.get(stage, f"Stage {stage}: fallback full fine-tuning."))
 
-        for name, param in model.named_parameters():
-            if id(param) in model.k_params_id:
-                param.requires_grad = False
-            else:
-                param.requires_grad = True
-
-        # Only parameters with requires_grad == True will be optimized.
-        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = None
-
-    elif stage == 2:
-        print("Stage 2: Freezing all parameters except k_params (which are unfrozen).")
-        
-        for name, param in model.named_parameters():
-            if id(param) not in model.k_params_id:
-                param.requires_grad = False
-            else:
-                param.requires_grad = True
-
-                # In stage 2, only k_params are trainable.
-        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
-
-    elif stage == 3:
-        print("Stage 3: Train dustbin and k_params (matcher/backbone frozen).")
-        for name, param in model.named_parameters():
-            if id(param) in model.k_params_id or id(param) in dustbin_ids:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-                # In stage 3, train dustbin and k_params.
-        optimizer = optim.AdamW(dustbin_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
-
-
-    # elif "stage3" in file:
-    #     stage = 3
-    #     # Stage 3: All parameters are trainable. We separate backbone parameters for a different LR.s
-    #     print("Stage 3: Unfreezing all layers for full fine-tuning.")
-    #     # Unfreeze every parameter
-    #     for name,  param in model.named_parameters():
-    #         param.requires_grad = True
-
-
-    #     optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-    #     optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-4)
-    elif stage == 4:
-        print("Stage 4: Joint fine-tuning (all parameters trainable).")
-        for _, param in model.named_parameters():
-            param.requires_grad = True
-        optimizer = optim.AdamW(model_params, lr=LR, weight_decay=1e-4)
-        optimizer_k = optim.AdamW(model.k_params, lr=K_LR, weight_decay=1e-6)
-    else:
-        stage = None
+    trainable_count = sum(int(p.requires_grad) for p in model.parameters())
+    total_count = sum(1 for _ in model.parameters())
+    print(f"Trainable params: {trainable_count}/{total_count}")
 
 
 
@@ -472,8 +729,8 @@ for file in config_files:
     # =====================================================
     # milestones = [int(0.6 * num_epochs), int(0.7 * num_epochs), int(0.9 * num_epochs)]
     # milestones = [int(0.025*num_epochs),int(0.05*num_epochs),int(0.2*num_epochs),int(0.4*num_epochs),int(0.6*num_epochs),int(0.8*num_epochs),int(0.1*num_epochs)]
-    warmup_epochs = defaults["WARMUP_EPOCHS"]
-    warmup_k_epochs = defaults["WARMUP_K_EPOCHS"]
+    warmup_epochs = WARMUP_EPOCHS
+    warmup_k_epochs = WARMUP_K_EPOCHS
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
@@ -487,9 +744,6 @@ for file in config_files:
     # =====================================================
     # Checkpoint Loading (if start_epoch > 0)
     # =====================================================
-    checkpoint_path = Path(OUTPUT_PATH) / 'params'
-    checkpoint_path.mkdir(parents=True, exist_ok=True)
-
     model_path = ""
     optim_path = ""
     optim_k_path = ""
@@ -501,6 +755,12 @@ for file in config_files:
         
     if len(PRETRAINED_PATH) > 0:
         model_path = PRETRAINED_PATH
+    elif start_epoch == 0:
+        default_pretrained = _default_pretrained_path(stage_output_paths, stage)
+        if default_pretrained and Path(default_pretrained).exists():
+            model_path = default_pretrained
+        elif default_pretrained:
+            print(f"[Stage {stage}] Default preload not found, starting fresh: {default_pretrained}")
 
     if len(model_path) > 0:
         print("Loading model parameters from {}".format(model_path))
@@ -515,20 +775,16 @@ for file in config_files:
     # Initialize warmup scheduler learning rates after loading optimizer state
     # if start_epoch == 0:  # Only for fresh training, not resuming
     print("Initializing warmup learning rates for first epoch...")
-    # Set the initial warmup learning rates
-    initial_lr = scheduler.get_initial_lr() if hasattr(scheduler, 'get_initial_lr') else LR / warmup_epochs
-    initial_backbone_lr = BACKBONE_LR / warmup_epochs  # Apply warmup to backbone LR too
-    
+    warmup_main = max(int(warmup_epochs), 1)
     for param_group in optimizer.param_groups:
-        if param_group == optimizer.param_groups[-1]:  # Backbone group (assuming it's last)
-            param_group['lr'] = initial_backbone_lr
-        else:  # Other parameter groups
-            param_group['lr'] = initial_lr
+        base_lr = float(param_group.get("base_lr", param_group.get("lr", LR)))
+        param_group['lr'] = base_lr / warmup_main
     
     if optimizer_k is not None and scheduler_k is not None:
-        initial_k_lr = scheduler_k.get_initial_lr() if hasattr(scheduler_k, 'get_initial_lr') else K_LR / warmup_k_epochs
+        warmup_k = max(int(warmup_k_epochs), 1)
         for param_group in optimizer_k.param_groups:
-            param_group['lr'] = initial_k_lr
+            base_lr = float(param_group.get("base_lr", param_group.get("lr", K_LR)))
+            param_group['lr'] = base_lr / warmup_k
 
 
     # best_model_path = str(checkpoint_path / "best_model.pt")
@@ -548,8 +804,8 @@ for file in config_files:
         print("-" * 10)
 
         model.train()
-        if stage in (2, 3):
-            # Stage 2/3 freeze most of the network; avoid BN train/eval drift.
+        if stage in (1, 2, 3):
+            # Stages with partial freezing should keep BN running stats fixed.
             model.apply(_set_batchnorm_eval)
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
         if optimizer_k is not None:
@@ -562,21 +818,18 @@ for file in config_files:
             for i, param_group in enumerate(optimizer_k.param_groups):
                 writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
 
-        # Compute SG dustbin weight for this epoch (optional ramp)
-        sg_weight = SG_DUSTBIN_WEIGHT
-        if isinstance(SG_DUSTBIN_RAMP, dict):
-            ramp_start = float(SG_DUSTBIN_RAMP.get("start", sg_weight))
-            ramp_end = float(SG_DUSTBIN_RAMP.get("end", sg_weight))
-            denom = max(num_epochs - 1, 1)
-            progress = (epoch - start_epoch) / denom
-            sg_weight = ramp_start + (ramp_end - ramp_start) * max(0.0, min(1.0, progress))
+        denom = max(num_epochs - 1, 1)
+        progress = max(0.0, min(1.0, (epoch - start_epoch) / denom))
+
+        # Optional per-stage ramps.
+        sg_weight = _ramp_value(SG_DUSTBIN_RAMP, progress, SG_DUSTBIN_WEIGHT)
+        auth_weight_epoch = _ramp_value(AUTH_WEIGHT_RAMP, progress, AUTH_WEIGHT)
+        model.k_cls_weight = _ramp_value(K_CLS_RAMP, progress, K_CLS_WEIGHT)
 
         writer.add_scalar('Train/SG_Dustbin_Weight', sg_weight, epoch)
-        k_pred_ramp = 0.0
-        if stage == 4 and TRAIN_USE_PRED_K:
-            denom = max(num_epochs - 1, 1)
-            k_pred_ramp = (epoch - start_epoch) / denom
-            k_pred_ramp = max(0.0, min(1.0, k_pred_ramp))
+        writer.add_scalar('Train/Auth_Weight', auth_weight_epoch, epoch)
+        writer.add_scalar('Train/K_CLS_Weight', model.k_cls_weight, epoch)
+        k_pred_ramp = progress if TRAIN_USE_PRED_K else 0.0
         model.k_pred_ramp = float(k_pred_ramp)
         writer.add_scalar('Train/K_Pred_Ramp', model.k_pred_ramp, epoch)
 
@@ -595,8 +848,7 @@ for file in config_files:
             logger,
             checkpoint_path,
             sg_dustbin_weight=sg_weight,
-            auth_weight=AUTH_WEIGHT,
-            stage2_full_loss=bool(TRAIN_USE_PRED_K),
+            auth_weight=auth_weight_epoch,
             detect_anomaly=DETECT_ANOMALY,
             max_iters=num_iterations,
         )
@@ -614,8 +866,7 @@ for file in config_files:
             logger,
             stage,
             sg_dustbin_weight=sg_weight,
-            auth_weight=AUTH_WEIGHT,
-            stage2_full_loss=bool(TRAIN_USE_PRED_K),
+            auth_weight=auth_weight_epoch,
         )
     
         
@@ -627,10 +878,15 @@ for file in config_files:
             save_model(model, best_model_path)
             with open(start_file, "w") as f:
                 json.dump({"start_epoch": epoch + 1}, f)
-            if stage == 4:
-                thresh_path = checkpoint_path / "auth_threshold.json"
-                with open(thresh_path, "w") as f:
-                    json.dump({"auth_threshold": float(auth_threshold)}, f)
+            if stage in (4, 5):
+                thresh_payload = {"auth_threshold": float(auth_threshold)}
+                thresh_paths = [
+                    checkpoint_path / "auth_threshold.json",
+                    Path(OUTPUT_PATH) / "auth_threshold.json",
+                ]
+                for thresh_path in thresh_paths:
+                    with open(thresh_path, "w") as f:
+                        json.dump(thresh_payload, f)
         else:
             no_improvement_count += 1
             print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(no_improvement_count, best_loss))

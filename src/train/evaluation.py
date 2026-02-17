@@ -45,7 +45,7 @@ def _calibrate_auth_threshold(probs, labels):
 
 
 def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None,
-                   sg_dustbin_weight=1.0, auth_weight=1.0, stage2_full_loss=False, max_iters=None):
+                   sg_dustbin_weight=1.0, auth_weight=1.0, max_iters=None):
     # Set model to evaluation mode
     model.eval()
 
@@ -55,6 +55,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     val_dustbin_sum = 0.0
     val_sg_dustbin_sum = 0.0
     val_auth_sum = 0.0
+    val_k_gate_sum = 0.0
+    val_auth_gate_sum = 0.0
+    val_dustbin_margin_sum = 0.0
     val_total_sum = 0.0
     val_num = 0
     val_accuracy_sum = 0.0
@@ -91,8 +94,14 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             dustbin_loss = outputs.get("dustbin_loss", torch.tensor(0.0, device=device))
             sg_dustbin_loss = outputs.get("sg_dustbin_loss", torch.tensor(0.0, device=device))
+            k_gate_loss = outputs.get("k_gate_loss", torch.tensor(0.0, device=device))
+            k_gate_loss_weight = float(outputs.get("k_gate_loss_weight", 0.0))
+            auth_gate_loss = outputs.get("auth_gate_loss", torch.tensor(0.0, device=device))
+            auth_gate_loss_weight = float(outputs.get("auth_gate_loss_weight", 0.0))
+            dustbin_margin_loss = outputs.get("dustbin_margin_loss", torch.tensor(0.0, device=device))
+            dustbin_margin_loss_weight = float(outputs.get("dustbin_margin_loss_weight", 0.0))
             auth_loss = torch.tensor(0.0, device=device)
-            if stage == 4 and "label" in batch and "auth_logit" in outputs:
+            if stage is not None and stage >= 2 and "label" in batch and "auth_logit" in outputs:
                 labels = batch["label"].to(device).view(-1).float()
                 auth_loss = F.binary_cross_entropy_with_logits(
                     outputs["auth_logit"].view(-1), labels
@@ -113,15 +122,25 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             dustbin_loss_value = dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else float(dustbin_loss)
             sg_dustbin_loss_value = sg_dustbin_loss.item() if isinstance(sg_dustbin_loss, torch.Tensor) else float(sg_dustbin_loss)
+            k_gate_loss_value = k_gate_loss.item() if isinstance(k_gate_loss, torch.Tensor) else float(k_gate_loss)
+            auth_gate_loss_value = (
+                auth_gate_loss.item() if isinstance(auth_gate_loss, torch.Tensor) else float(auth_gate_loss)
+            )
+            dustbin_margin_loss_value = (
+                dustbin_margin_loss.item()
+                if isinstance(dustbin_margin_loss, torch.Tensor)
+                else float(dustbin_margin_loss)
+            )
             total_loss_value = (
                 loss_value
                 + ks_loss_value
                 + dustbin_loss_value
                 + (sg_dustbin_loss_value * sg_dustbin_weight)
                 + (auth_loss.item() * auth_weight)
+                + (k_gate_loss_value * k_gate_loss_weight)
+                + (auth_gate_loss_value * auth_gate_loss_weight)
+                + (dustbin_margin_loss_value * dustbin_margin_loss_weight)
             )
-            if stage == 2 and not stage2_full_loss:
-                total_loss_value = ks_loss_value
             
             # Report accuracy
             acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
@@ -137,6 +156,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             val_dustbin_sum += dustbin_loss_value
             val_sg_dustbin_sum += sg_dustbin_loss_value
             val_auth_sum += auth_loss.item()
+            val_k_gate_sum += k_gate_loss_value
+            val_auth_gate_sum += auth_gate_loss_value
+            val_dustbin_margin_sum += dustbin_margin_loss_value
             val_total_sum += total_loss_value
 
             if val_num % 5 == 0:
@@ -147,6 +169,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     avg_dustbin_loss = val_dustbin_sum / val_num
     avg_sg_dustbin_loss = val_sg_dustbin_sum / val_num
     avg_val_auth = val_auth_sum / val_num
+    avg_k_gate = val_k_gate_sum / val_num
+    avg_auth_gate = val_auth_gate_sum / val_num
+    avg_dustbin_margin = val_dustbin_margin_sum / val_num
     avg_val_total = val_total_sum / val_num
     avg_val_accuracy = val_accuracy_sum / val_num
     if k_pred_list and k_gt_list:
@@ -177,6 +202,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     writer.add_scalar('Validation/Dustbin_Loss', avg_dustbin_loss, epoch)
     writer.add_scalar('Validation/SG_Dustbin_Loss', avg_sg_dustbin_loss, epoch)
     writer.add_scalar('Validation/Auth_Loss', avg_val_auth, epoch)
+    writer.add_scalar('Validation/K_Gate_Loss', avg_k_gate, epoch)
+    writer.add_scalar('Validation/Auth_Gate_Loss', avg_auth_gate, epoch)
+    writer.add_scalar('Validation/Dustbin_Margin_Loss', avg_dustbin_margin, epoch)
     writer.add_scalar('Validation/Total_Loss', avg_val_total, epoch)
     writer.add_scalar('Validation/Accuracy', avg_val_accuracy, epoch)
     if auth_acc is not None:
@@ -190,6 +218,9 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
         f"KS Loss = {avg_ks_loss:.4f}, Dustbin Loss = {avg_dustbin_loss:.4f}, "
         f"SG Dustbin Loss = {avg_sg_dustbin_loss:.4f}, "
         f"Auth Loss = {avg_val_auth:.4f}, "
+        f"K Gate Loss = {avg_k_gate:.4f}, "
+        f"Auth Gate Loss = {avg_auth_gate:.4f}, "
+        f"Dustbin Margin Loss = {avg_dustbin_margin:.4f}, "
         f"Total Loss = {avg_val_total:.4f}, "
         f"Auth Threshold = {auth_threshold:.4f}"
     )
@@ -241,7 +272,7 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
                 auth_probs.append(outputs["auth_prob"].detach().view(-1).cpu())
                 auth_labels.append(batch["label"].detach().view(-1).cpu())
 
-            if stage == 4 and 'label' in batch:
+            if stage in (4, 5) and 'label' in batch:
                 # Handle batch of labels instead of assuming single element
                 labels = batch['label'] if isinstance(batch['label'], torch.Tensor) else torch.tensor(batch['label'])
                 
@@ -362,7 +393,7 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
     if last_batch is not None and last_outputs is not None:
         _visualize(last_batch, last_outputs, 'match')
 
-    if stage == 4:
+    if stage in (4, 5):
         if genuine_pair is not None:
             _visualize(genuine_pair[0], genuine_pair[1], 'genuine_match')
         if imposter_pair is not None:

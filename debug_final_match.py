@@ -142,9 +142,6 @@ def main():
         k_reg_weight=ngm_config.get("K_REG_WEIGHT", 0.2),
         k_cls_weight=ngm_config.get("K_CLS_WEIGHT", 1.0),
         dustbin_loss_weight=ngm_config.get("DUSTBIN_LOSS_WEIGHT", 0.5),
-        k_gate_enable=ngm_config.get("K_GATE_ENABLE", False),
-        k_gate_thresh=ngm_config.get("K_GATE_THRESH", 0.2),
-        k_match_rounding=ngm_config.get("K_MATCH_ROUNDING", "floor"),
     )
     model.dustbin_reject_enable = bool(train_config.get("DUSTBIN_REJECT_ENABLE", True))
     model.dustbin_reject_margin = float(train_config.get("DUSTBIN_REJECT_MARGIN", 0.0))

@@ -185,3 +185,4 @@ result/*
 logs/*
 events.*
 *.txt
+dataset/**

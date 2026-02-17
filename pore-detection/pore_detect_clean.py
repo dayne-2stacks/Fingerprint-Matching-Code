@@ -95,8 +95,11 @@ def detect_pores(start_idx=0, end_idx=50, device='cuda', features=40, dataset_pa
                        detections, image.shape[0], image.shape[1], 17)
             
             # Create and save visualization
-            # result_image = draw(image, detections, 5, [0, 0, 255], 1)
-            cv2.imwrite(f'out_of_the_box_detect/Prediction/{dataset}/Fingerprint/{identifier}.png', image)
+            result_image = draw(image, detections, 5, [0, 0, 255], 1)
+            if result_image is not None:
+                cv2.imwrite(f'out_of_the_box_detect/Prediction/{dataset}/Fingerprint/{identifier}.png', result_image)
+            else:
+                cv2.imwrite(f'out_of_the_box_detect/Prediction/{dataset}/Fingerprint/{identifier}.png', image)
             
             processed_count += 1
             
@@ -115,7 +118,7 @@ if __name__ == "__main__":
     parser.add_argument('--start_index', type=int, default=0, help='Starting image index')
     parser.add_argument('--end_index', type=int, default=10000, help='Ending image index')
     parser.add_argument('--device', type=str, default='cuda', help='Device: cuda or cpu')
-    parser.add_argument('--features', type=int, default=40, help='Model features')
+    parser.add_argument('--features', type=int, default=64, help='Model features')
     parser.add_argument('--dataset-path', type=str, default='/green/data/L3SF_V2/L3-SF/', help='Path to the dataset')
     parser.add_argument('--dataset-name', type=str, default='L3-SF', help='Name of the dataset')
     
