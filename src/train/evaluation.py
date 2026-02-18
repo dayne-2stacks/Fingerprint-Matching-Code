@@ -23,29 +23,8 @@ def _should_strip_dustbin(outputs):
     col_sum = gt[..., :, -1].sum(dim=-2)
     return bool((row_sum > 1).any() or (col_sum > 1).any())
 
-def _calibrate_auth_threshold(probs, labels):
-    probs = np.asarray(probs)
-    labels = np.asarray(labels).astype(np.int32)
-    if probs.size == 0:
-        return 0.5, None
-    pos = labels.sum()
-    neg = len(labels) - pos
-    if pos == 0 or neg == 0:
-        return 0.5, None
-    order = np.argsort(probs)[::-1]
-    probs_sorted = probs[order]
-    labels_sorted = labels[order]
-    tp = np.cumsum(labels_sorted == 1)
-    fp = np.cumsum(labels_sorted == 0)
-    tpr = tp / pos
-    fpr = fp / neg
-    fnr = 1.0 - tpr
-    idx = np.nanargmin(np.abs(fpr - fnr))
-    return float(probs_sorted[idx]), (tpr, fpr)
 
-
-def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None,
-                   sg_dustbin_weight=1.0, auth_weight=1.0, max_iters=None):
+def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, stage=None, max_iters=None):
     # Set model to evaluation mode
     model.eval()
 
@@ -53,10 +32,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     val_loss_sum = 0.0
     val_ks_sum = 0.0
     val_dustbin_sum = 0.0
-    val_sg_dustbin_sum = 0.0
-    val_auth_sum = 0.0
-    val_k_gate_sum = 0.0
-    val_auth_gate_sum = 0.0
     val_dustbin_margin_sum = 0.0
     val_total_sum = 0.0
     val_num = 0
@@ -66,8 +41,7 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     k_zero_hits = 0
     k_zero_total = 0
 
-    auth_probs = []
-    auth_labels = []
+
     with torch.no_grad():
         for batch in islice(dataloader, max_iters):
             val_num += 1
@@ -93,22 +67,8 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             dustbin_loss = outputs.get("dustbin_loss", torch.tensor(0.0, device=device))
-            sg_dustbin_loss = outputs.get("sg_dustbin_loss", torch.tensor(0.0, device=device))
-            k_gate_loss = outputs.get("k_gate_loss", torch.tensor(0.0, device=device))
-            k_gate_loss_weight = float(outputs.get("k_gate_loss_weight", 0.0))
-            auth_gate_loss = outputs.get("auth_gate_loss", torch.tensor(0.0, device=device))
-            auth_gate_loss_weight = float(outputs.get("auth_gate_loss_weight", 0.0))
             dustbin_margin_loss = outputs.get("dustbin_margin_loss", torch.tensor(0.0, device=device))
             dustbin_margin_loss_weight = float(outputs.get("dustbin_margin_loss_weight", 0.0))
-            auth_loss = torch.tensor(0.0, device=device)
-            if stage is not None and stage >= 2 and "label" in batch and "auth_logit" in outputs:
-                labels = batch["label"].to(device).view(-1).float()
-                auth_loss = F.binary_cross_entropy_with_logits(
-                    outputs["auth_logit"].view(-1), labels
-                )
-            if "auth_prob" in outputs and "label" in batch:
-                auth_probs.append(outputs["auth_prob"].detach().view(-1).cpu())
-                auth_labels.append(batch["label"].detach().view(-1).cpu())
             if "k_pred_count" in outputs and "gt_ks" in outputs:
                 k_pred_list.append(outputs["k_pred_count"].detach().view(-1).cpu())
                 k_gt_list.append(outputs["gt_ks"].detach().view(-1).cpu())
@@ -121,11 +81,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
             dustbin_loss_value = dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else float(dustbin_loss)
-            sg_dustbin_loss_value = sg_dustbin_loss.item() if isinstance(sg_dustbin_loss, torch.Tensor) else float(sg_dustbin_loss)
-            k_gate_loss_value = k_gate_loss.item() if isinstance(k_gate_loss, torch.Tensor) else float(k_gate_loss)
-            auth_gate_loss_value = (
-                auth_gate_loss.item() if isinstance(auth_gate_loss, torch.Tensor) else float(auth_gate_loss)
-            )
             dustbin_margin_loss_value = (
                 dustbin_margin_loss.item()
                 if isinstance(dustbin_margin_loss, torch.Tensor)
@@ -135,10 +90,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
                 loss_value
                 + ks_loss_value
                 + dustbin_loss_value
-                + (sg_dustbin_loss_value * sg_dustbin_weight)
-                + (auth_loss.item() * auth_weight)
-                + (k_gate_loss_value * k_gate_loss_weight)
-                + (auth_gate_loss_value * auth_gate_loss_weight)
                 + (dustbin_margin_loss_value * dustbin_margin_loss_weight)
             )
             
@@ -154,10 +105,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
             val_loss_sum += loss_value
             val_ks_sum += ks_loss_value
             val_dustbin_sum += dustbin_loss_value
-            val_sg_dustbin_sum += sg_dustbin_loss_value
-            val_auth_sum += auth_loss.item()
-            val_k_gate_sum += k_gate_loss_value
-            val_auth_gate_sum += auth_gate_loss_value
             val_dustbin_margin_sum += dustbin_margin_loss_value
             val_total_sum += total_loss_value
 
@@ -167,10 +114,6 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
     avg_val_loss = val_loss_sum / val_num
     avg_ks_loss = val_ks_sum / val_num
     avg_dustbin_loss = val_dustbin_sum / val_num
-    avg_sg_dustbin_loss = val_sg_dustbin_sum / val_num
-    avg_val_auth = val_auth_sum / val_num
-    avg_k_gate = val_k_gate_sum / val_num
-    avg_auth_gate = val_auth_gate_sum / val_num
     avg_dustbin_margin = val_dustbin_margin_sum / val_num
     avg_val_total = val_total_sum / val_num
     avg_val_accuracy = val_accuracy_sum / val_num
@@ -184,58 +127,31 @@ def validate_epoch(model, dataloader, criterion, device, writer, epoch, logger, 
         if k_zero_total > 0:
             writer.add_scalar('Validation/K_Zero_Acc', k_zero_hits / k_zero_total, epoch)
 
-    auth_threshold = 0.5
-    auth_auc = None
-    auth_acc = None
-    if auth_probs and auth_labels:
-        probs = torch.cat(auth_probs).numpy()
-        labels = torch.cat(auth_labels).numpy()
-        auth_threshold, curves = _calibrate_auth_threshold(probs, labels)
-        if curves is not None:
-            tpr, fpr = curves
-            auth_auc = float(np.trapz(tpr, fpr))
-        auth_acc = float(((probs >= auth_threshold).astype(np.float32) == labels).mean())
 
 
     writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
     writer.add_scalar('Validation/KS_Loss', avg_ks_loss, epoch)
     writer.add_scalar('Validation/Dustbin_Loss', avg_dustbin_loss, epoch)
-    writer.add_scalar('Validation/SG_Dustbin_Loss', avg_sg_dustbin_loss, epoch)
-    writer.add_scalar('Validation/Auth_Loss', avg_val_auth, epoch)
-    writer.add_scalar('Validation/K_Gate_Loss', avg_k_gate, epoch)
-    writer.add_scalar('Validation/Auth_Gate_Loss', avg_auth_gate, epoch)
     writer.add_scalar('Validation/Dustbin_Margin_Loss', avg_dustbin_margin, epoch)
     writer.add_scalar('Validation/Total_Loss', avg_val_total, epoch)
     writer.add_scalar('Validation/Accuracy', avg_val_accuracy, epoch)
-    if auth_acc is not None:
-        writer.add_scalar('Validation/Auth_Acc', auth_acc, epoch)
-    if auth_auc is not None:
-        writer.add_scalar('Validation/Auth_AUC', auth_auc, epoch)
-    writer.add_scalar('Validation/Auth_Threshold', auth_threshold, epoch)
-
+    
     log_msg = (
         f"Epoch {epoch} Validation: Primary Loss = {avg_val_loss:.4f}, "
         f"KS Loss = {avg_ks_loss:.4f}, Dustbin Loss = {avg_dustbin_loss:.4f}, "
-        f"SG Dustbin Loss = {avg_sg_dustbin_loss:.4f}, "
-        f"Auth Loss = {avg_val_auth:.4f}, "
-        f"K Gate Loss = {avg_k_gate:.4f}, "
-        f"Auth Gate Loss = {avg_auth_gate:.4f}, "
         f"Dustbin Margin Loss = {avg_dustbin_margin:.4f}, "
         f"Total Loss = {avg_val_total:.4f}, "
-        f"Auth Threshold = {auth_threshold:.4f}"
     )
     print(log_msg)
     logger.info(log_msg)
 
-    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy, auth_threshold
+    return avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy
 
-def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None, auth_threshold=None, max_iters=None):
+def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=None, max_iters=None):
     model.eval()
     test_loss_sum = 0.0
     test_accuracy_sum = 0.0
     test_num = 0
-    auth_probs = []
-    auth_labels = []
     last_batch = None
     last_outputs = None
     genuine_pair = None
@@ -268,11 +184,8 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
            
             test_loss_sum += loss.item()
             test_accuracy_sum += acc
-            if "auth_prob" in outputs and "label" in batch:
-                auth_probs.append(outputs["auth_prob"].detach().view(-1).cpu())
-                auth_labels.append(batch["label"].detach().view(-1).cpu())
 
-            if stage in (4, 5) and 'label' in batch:
+            if stage is not None and stage >= 2 and 'label' in batch:
                 # Handle batch of labels instead of assuming single element
                 labels = batch['label'] if isinstance(batch['label'], torch.Tensor) else torch.tensor(batch['label'])
                 
@@ -339,12 +252,6 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
 
     writer.add_scalar('Test/Loss', avg_test_loss, epoch)
     writer.add_scalar('Test/Accuracy', avg_test_accuracy, epoch)
-    if auth_probs and auth_labels:
-        probs = torch.cat(auth_probs).numpy()
-        labels = torch.cat(auth_labels).numpy()
-        threshold = auth_threshold if auth_threshold is not None else 0.5
-        auth_acc = float(((probs >= threshold).astype(np.float32) == labels).mean())
-        writer.add_scalar('Test/Auth_Acc', auth_acc, epoch)
 
     def _visualize(batch, outputs, tag):
         if 'Ps' in batch:
@@ -393,7 +300,7 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
     if last_batch is not None and last_outputs is not None:
         _visualize(last_batch, last_outputs, 'match')
 
-    if stage in (4, 5):
+    if stage is not None and stage >= 2:
         if genuine_pair is not None:
             _visualize(genuine_pair[0], genuine_pair[1], 'genuine_match')
         if imposter_pair is not None:

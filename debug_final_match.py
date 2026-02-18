@@ -139,8 +139,6 @@ def main():
     # Model config mirrors train.py
     model = Net(
         regression=ngm_config.get("REGRESSION", True),
-        k_reg_weight=ngm_config.get("K_REG_WEIGHT", 0.2),
-        k_cls_weight=ngm_config.get("K_CLS_WEIGHT", 1.0),
         dustbin_loss_weight=ngm_config.get("DUSTBIN_LOSS_WEIGHT", 0.5),
     )
     model.dustbin_reject_enable = bool(train_config.get("DUSTBIN_REJECT_ENABLE", True))

@@ -54,35 +54,6 @@ def _setup_logging(log_path: Path) -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-def _resolve_decision_threshold(
-    checkpoint_root: Path,
-    cli_auth_threshold: Optional[float],
-    logger: logging.Logger,
-) -> float:
-    if cli_auth_threshold is not None:
-        threshold = float(cli_auth_threshold)
-        logger.info("Using CLI auth threshold: %.4f", threshold)
-        return threshold
-
-    threshold_candidates = [
-        checkpoint_root / "auth_threshold.json",
-        checkpoint_root / "params" / "auth_threshold.json",
-    ]
-    for threshold_file in threshold_candidates:
-        if not threshold_file.exists():
-            continue
-        try:
-            with open(threshold_file, "r") as f:
-                data = json.load(f)
-            threshold = float(data.get("auth_threshold", 0.5))
-            logger.info("Using checkpoint auth threshold from %s: %.4f", threshold_file, threshold)
-            return threshold
-        except Exception as exc:
-            logger.warning("Failed to read %s (%s); trying next fallback.", threshold_file, exc)
-
-    logger.info("Using default auth threshold: 0.5000")
-    return 0.5
-
 
 def _compute_curve_stats(labels: np.ndarray, probs: np.ndarray, logger: logging.Logger):
     unique_labels = np.unique(labels)
@@ -121,7 +92,7 @@ def _compute_curve_stats(labels: np.ndarray, probs: np.ndarray, logger: logging.
     }
 
 
-def evaluate(dataset_name: str, data_root: str, filter=None, auth_threshold: Optional[float] = None):
+def evaluate(dataset_name: str, data_root: str, filter=None):
     """Run evaluation using the best classifier model for the chosen dataset.
     """
     dataset_len = None
@@ -191,7 +162,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None, auth_threshold: Opt
     match_net.dustbin_reject_margin = 0.0
     match_net.to(device).eval()
     logger.info("Device: %s", device)
-    decision_threshold = _resolve_decision_threshold(checkpoint_root, auth_threshold, logger)
+    decision_threshold = 0.5
 
     all_labels = []
     all_probs = []
@@ -230,11 +201,8 @@ def evaluate(dataset_name: str, data_root: str, filter=None, auth_threshold: Opt
             min_points = torch.min(ns[0], ns[1]).float().clamp(min=1.0)
             k_score = (k_pred / min_points).clamp(0, 1)
 
-            # Use learned authentication probability if available.
-            if "auth_prob" in outputs:
-                prob = outputs["auth_prob"].detach().view(-1).clamp(0, 1)
-            else:
-                prob = k_score
+           
+            prob = k_score
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
             all_raw_k.append(k_pred.cpu()) 
@@ -599,12 +567,7 @@ if __name__ == "__main__":
         default="none",
         help="Keypoint filter strategy. Use 'none' to keep all keypoints.",
     )
-    parser.add_argument(
-        "--auth-threshold",
-        type=float,
-        default=None,
-        help="Optional fixed authentication threshold. Overrides checkpoint/default threshold selection.",
-    )
+
     args = parser.parse_args()
 
     if args.data_root is None:
@@ -623,4 +586,4 @@ if __name__ == "__main__":
     if filter_value == "none":
         filter_value = None
 
-    evaluate(args.dataset, data_root, filter=filter_value, auth_threshold=args.auth_threshold)
+    evaluate(args.dataset, data_root, filter=filter_value)

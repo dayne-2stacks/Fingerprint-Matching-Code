@@ -1,19 +1,10 @@
 train:
-  start_epoch: 0         # Set to a positive integer to resume from a checkpoint
-  num_iterations: 25    # Iterations per epoch
-  BATCH_SIZE: 1
-  K_Optimize: false       # Whether to optimize k (AFA) modules separately
-  K_LOSS: false          # Whether to use k_loss as the primary metric for early stopping
-  LR: 1.e-3               # Learning rate for main network (joint training)
-  BACKBONE_LR: 1.e-4      # Learning rate for backbone parameters
-  K_LR: 2.e-3             # Learning rate for k-regression (AFA) modules
-  LR_DECAY: 0.5          # LR decay factor
-  patience: 5           # Early stopping patience (in epochs)
-  num_epochs: 20
-  MODEL_PATH: results/binary-classifier
-  OUTPUT_PATH: results/binary-classifier
-  PRETRAINED_PATH: ""
-  CHECKPOINT_PATH: checkpoints
-  LOG_DIR: logs/tensorboard
+  num_iterations: 50
+  patience: 12
+  LR: 1.e-4
+  K_LR: 5.e-4
+  BACKBONE_LR: 1.e-5
+  OUTPUT_PATH: results5/shared_matcher/stage1
 ngm:
-  REGRESSION: false       # If true, use predicted k in stage 3; otherwise, use ground truth k
+  REGRESSION: false
+  DUSTBIN_REJECT_ENABLE: false

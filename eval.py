@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate dual-model shared matches over a dataset split."""
+"""Evaluate shared matches over a dataset split."""
 
 from __future__ import annotations
 
@@ -37,11 +37,10 @@ from utils.models_sl import load_model
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run top-k and dustbin models over a split, intersect permutation "
-            "matrices, and report ROC + normalized/raw k statistics."
+            "Run a matcher over a split and report ROC + normalized/raw shared-k statistics."
         )
     )
-    parser.add_argument("--config", default="stage5.yml", help="Stage config YAML for dataloader defaults.")
+    parser.add_argument("--config", default="stage4.yml", help="Stage config YAML for dataloader defaults.")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val", help="Dataset split.")
     parser.add_argument("--dataset-len", type=int, default=640, help="Dataset length for GMDataset.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config.")
@@ -52,16 +51,7 @@ def parse_args() -> argparse.Namespace:
         help="Override benchmark name from config.",
     )
     parser.add_argument("--train-root", default=None, help="Override dataset root.")
-    parser.add_argument(
-        "--topk-weights",
-        default="results3/topk/stage2/params/best_model.pt",
-        help="Top-k checkpoint path.",
-    )
-    parser.add_argument(
-        "--dustbin-weights",
-        default="results3/dustbin/stage4/params/best_model.pt",
-        help="Dustbin checkpoint path.",
-    )
+    parser.add_argument("--weights", default="results4/joint/stage4/params/best_model.pt", help="Checkpoint path.")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Inference device.")
     parser.add_argument("--decision-threshold", type=float, default=0.5, help="Threshold for binary predictions.")
     parser.add_argument("--out-dir", default="debug_outputs/eval", help="Output directory.")
@@ -131,9 +121,8 @@ def _move_to_device(value: Any, device: torch.device) -> Any:
     return value
 
 
-def _load_model_for_branch(
+def _load_model(
     weights_path: Path,
-    branch: str,
     device: torch.device,
     ngm_cfg: Dict[str, Any],
 ) -> Net:
@@ -142,14 +131,11 @@ def _load_model_for_branch(
 
     model = Net(
         regression=bool(ngm_cfg.get("REGRESSION", True)),
-        k_reg_weight=float(ngm_cfg.get("K_REG_WEIGHT", 0.2)),
-        k_cls_weight=float(ngm_cfg.get("K_CLS_WEIGHT", 1.0)),
         dustbin_loss_weight=float(ngm_cfg.get("DUSTBIN_LOSS_WEIGHT", 0.5)),
     )
-    model.match_branch = branch
     model.train_use_pred_k = bool(ngm_cfg.get("TRAIN_USE_PRED_K", False))
-    model.dustbin_reject_enable = branch == "dustbin"
-    model.set_dustbin_reject_margin(0.0)
+    model.dustbin_reject_enable = bool(ngm_cfg.get("DUSTBIN_REJECT_ENABLE", True))
+    model.dustbin_reject_margin = 0.0
     model.to(device)
     load_model(model, str(weights_path), strict=False)
     model.eval()
@@ -162,11 +148,15 @@ def _run_model(model: Net, batch: Dict[str, Any], device: torch.device) -> Dict[
         return model(model_input)
 
 
-def _extract_real_perm(outputs: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if "perm_mat" not in outputs or "ns" not in outputs:
-        raise KeyError("Model outputs missing required keys: perm_mat, ns")
+def _extract_real_perm(
+    outputs: Dict[str, Any],
+    *,
+    perm_key: str = "perm_mat",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if perm_key not in outputs or "ns" not in outputs:
+        raise KeyError(f"Model outputs missing required keys: {perm_key}, ns")
 
-    perm = outputs["perm_mat"]
+    perm = outputs[perm_key]
     if not isinstance(perm, torch.Tensor):
         perm = torch.as_tensor(perm)
     device = perm.device
@@ -174,7 +164,6 @@ def _extract_real_perm(outputs: Dict[str, Any]) -> tuple[torch.Tensor, torch.Ten
     n1 = _to_1d_long_tensor(outputs["ns"][0], device)
     n2 = _to_1d_long_tensor(outputs["ns"][1], device)
     if bool(outputs.get("has_dustbin", False)):
-        print("N1 is", n1)
         n1 = torch.clamp(n1 - 1, min=0)
         n2 = torch.clamp(n2 - 1, min=0)
 
@@ -298,8 +287,7 @@ def _get_pair_ids(batch: Dict[str, Any], idx: int) -> tuple[str, str]:
 
 def _evaluate_split(
     dataloader,
-    topk_model: Net,
-    dustbin_model: Net,
+    model: Net,
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
     rows = []
@@ -309,22 +297,10 @@ def _evaluate_split(
 
     with torch.no_grad():
         for it, batch in enumerate(dataloader, start=1):
-            topk_outputs = _run_model(topk_model, batch, device)
-            dustbin_outputs = _run_model(dustbin_model, batch, device)
-
-            topk_perm, topk_n1, topk_n2 = _extract_real_perm(topk_outputs)
-            dust_perm, dust_n1, dust_n2 = _extract_real_perm(dustbin_outputs)
-
-            max_h = min(topk_perm.shape[1], dust_perm.shape[1])
-            max_w = min(topk_perm.shape[2], dust_perm.shape[2])
-            shared_perm = (
-                (topk_perm[:, :max_h, :max_w] > 0.5) & (dust_perm[:, :max_h, :max_w] > 0.5)
-            ).to(torch.float32)
-
+            outputs = _run_model(model, batch, device)
+            shared_perm, n1, n2 = _extract_real_perm(outputs, perm_key="perm_mat")
             shared_k = shared_perm.sum(dim=(1, 2)).to(torch.float32).cpu()
-            min_topk = torch.minimum(topk_n1, topk_n2).to(torch.float32).cpu()
-            min_dust = torch.minimum(dust_n1, dust_n2).to(torch.float32).cpu()
-            min_points = torch.minimum(min_topk, min_dust).clamp(min=1.0)
+            min_points = torch.minimum(n1, n2).to(torch.float32).cpu().clamp(min=1.0)
             norm_k = (shared_k / min_points).clamp(0.0, 1.0)
 
             labels = batch["label"].view(-1).detach().cpu().to(torch.int32)
@@ -394,23 +370,20 @@ def main() -> None:
     else:
         dataloader = val_loader
 
-    topk_weights = Path(args.topk_weights)
-    dustbin_weights = Path(args.dustbin_weights)
+    weights = Path(args.weights)
     requested_device = _resolve_device(args.device)
 
-    topk_model = _load_model_for_branch(topk_weights, "topk", requested_device, ngm_cfg)
-    dustbin_model = _load_model_for_branch(dustbin_weights, "dustbin", requested_device, ngm_cfg)
+    model = _load_model(weights, requested_device, ngm_cfg)
 
     try:
-        eval_data = _evaluate_split(dataloader, topk_model, dustbin_model, requested_device)
+        eval_data = _evaluate_split(dataloader, model, requested_device)
         actual_device = requested_device
     except RuntimeError as exc:
         if requested_device.type == "cuda" and "device-side assert" in str(exc):
             print("CUDA device-side assert detected; retrying full evaluation on CPU.")
             cpu_device = torch.device("cpu")
-            topk_model = _load_model_for_branch(topk_weights, "topk", cpu_device, ngm_cfg)
-            dustbin_model = _load_model_for_branch(dustbin_weights, "dustbin", cpu_device, ngm_cfg)
-            eval_data = _evaluate_split(dataloader, topk_model, dustbin_model, cpu_device)
+            model = _load_model(weights, cpu_device, ngm_cfg)
+            eval_data = _evaluate_split(dataloader, model, cpu_device)
             actual_device = cpu_device
         else:
             raise

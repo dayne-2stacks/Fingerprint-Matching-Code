@@ -1,21 +1,14 @@
 train:
-  start_epoch: 0
   num_iterations: 25
-  BATCH_SIZE: 1
-  K_Optimize: true
-  K_LOSS: false
-  LR: 1.e-4
-  BACKBONE_LR: 1.e-4
+  num_epochs: 50
+  LR: 2.e-5
   K_LR: 1.e-4
-  LR_DECAY: 0.5
-  patience: 5
-  num_epochs: 20
-
-  MODEL_PATH: results/binary-classifier
-  OUTPUT_PATH: results/binary-classifier
-  PRETRAINED_PATH: 
+  BACKBONE_LR: 5.e-6
+  BATCH_SIZE: 8
+  OVERFIT_TO_TRAIN_SPLIT: true
+  OUTPUT_PATH: results3/dustbin/stage5
+  PRETRAINED_PATH: ""
   CHECKPOINT_PATH: checkpoints
-  LOG_DIR: logs/tensorboard
 ngm:
   REGRESSION: true
-  
+  TRAIN_USE_PRED_K: false

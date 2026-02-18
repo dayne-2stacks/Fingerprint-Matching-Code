@@ -185,4 +185,4 @@ result/*
 logs/*
 events.*
 *.txt
-dataset/**
+test*
