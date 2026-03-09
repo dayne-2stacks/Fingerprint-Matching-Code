@@ -18,19 +18,17 @@ import torch_geometric as pyg
 import yaml
 from sklearn.metrics import (
     accuracy_score,
-    auc,
     confusion_matrix,
     f1_score,
-    precision_recall_curve,
     precision_score,
     recall_score,
-    roc_curve,
 )
 
 from src.gmdataset import get_dataloader
 from src.model.dustbin import strip_dustbin_by_ns
 from src.model.ngm import Net
 from src.train.data_loader import build_dataloaders
+from utils.eval_cli_common import compute_curve_stats
 from utils.models_sl import load_model
 
 
@@ -40,7 +38,7 @@ def parse_args() -> argparse.Namespace:
             "Run a matcher over a split and report ROC + normalized/raw shared-k statistics."
         )
     )
-    parser.add_argument("--config", default="stage4.yml", help="Stage config YAML for dataloader defaults.")
+    parser.add_argument("--config", default="stage3.yml", help="Stage config YAML for dataloader defaults.")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val", help="Dataset split.")
     parser.add_argument("--dataset-len", type=int, default=640, help="Dataset length for GMDataset.")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config.")
@@ -51,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         help="Override benchmark name from config.",
     )
     parser.add_argument("--train-root", default=None, help="Override dataset root.")
-    parser.add_argument("--weights", default="results4/joint/stage4/params/best_model.pt", help="Checkpoint path.")
+    parser.add_argument("--weights", default="results5/dustbin/stage3/params/best_model.pt", help="Checkpoint path.")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Inference device.")
     parser.add_argument("--decision-threshold", type=float, default=0.5, help="Threshold for binary predictions.")
     parser.add_argument("--out-dir", default="debug_outputs/eval", help="Output directory.")
@@ -133,7 +131,7 @@ def _load_model(
         regression=bool(ngm_cfg.get("REGRESSION", True)),
         dustbin_loss_weight=float(ngm_cfg.get("DUSTBIN_LOSS_WEIGHT", 0.5)),
     )
-    model.train_use_pred_k = bool(ngm_cfg.get("TRAIN_USE_PRED_K", False))
+    model.train_use_pred_k = bool(ngm_cfg.get("TRAIN_USE_PRED_K", True))
     model.dustbin_reject_enable = bool(ngm_cfg.get("DUSTBIN_REJECT_ENABLE", True))
     model.dustbin_reject_margin = 0.0
     model.to(device)
@@ -172,39 +170,6 @@ def _extract_real_perm(
         perm_real = torch.as_tensor(perm_real, device=device)
     perm_bin = (perm_real > 0.5).to(torch.float32)
     return perm_bin, n1, n2
-
-
-def _compute_curve_stats(labels: np.ndarray, scores: np.ndarray) -> Dict[str, Any]:
-    unique_labels = np.unique(labels)
-    if unique_labels.size < 2:
-        return {
-            "fpr": None,
-            "tpr": None,
-            "roc_auc": float("nan"),
-            "prec_curve": None,
-            "rec_curve": None,
-            "pr_auc": float("nan"),
-            "eer_threshold": None,
-            "eer": float("nan"),
-        }
-
-    fpr, tpr, thresholds = roc_curve(labels, scores)
-    fnr = 1.0 - tpr
-    eer_idx = int(np.nanargmin(np.abs(fnr - fpr)))
-    eer_threshold = float(thresholds[eer_idx])
-    eer = float((fpr[eer_idx] + fnr[eer_idx]) * 0.5)
-
-    prec_curve, rec_curve, _ = precision_recall_curve(labels, scores)
-    return {
-        "fpr": fpr,
-        "tpr": tpr,
-        "roc_auc": float(auc(fpr, tpr)),
-        "prec_curve": prec_curve,
-        "rec_curve": rec_curve,
-        "pr_auc": float(auc(rec_curve, prec_curve)),
-        "eer_threshold": eer_threshold,
-        "eer": eer,
-    }
 
 
 def _save_plots(
@@ -392,7 +357,7 @@ def main() -> None:
     raw_k = eval_data["raw_k"].astype(np.float32)
     norm_k = eval_data["norm_k"].astype(np.float32)
 
-    curve_stats = _compute_curve_stats(labels, norm_k)
+    curve_stats = compute_curve_stats(labels, norm_k)
     decision_threshold = float(args.decision_threshold)
     preds = (norm_k >= decision_threshold).astype(np.int32)
 

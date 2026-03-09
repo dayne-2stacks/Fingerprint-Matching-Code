@@ -1,9 +1,10 @@
 train:
   num_iterations: 50
-  patience: 12
+  patience: 10
   LR: 1.e-4
   K_LR: 5.e-4
   BACKBONE_LR: 1.e-5
+  STAGE1_SS_BASE_AUX_WEIGHT: 0.01
   OUTPUT_PATH: results5/shared_matcher/stage1
 ngm:
   REGRESSION: false

@@ -9,11 +9,12 @@ import re
 from collections import defaultdict
 from utils.build_graphs import build_graphs
 from utils.factorize_graph_matching import kronecker_sparse, kronecker_torch
+from utils.pad_tensor import pad_tensor
 from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
-from utils.augmentation import augment_image, augment_image_pair, augment_two_images
+from utils.augmentation import augment_image, augment_image_pair, augment_two_images, _standardize_to_model as _standardize
 from itertools import combinations
-from src.model.ngm import UNIV_SIZE
+from src.model.ngm import CROPSIZE, UNIV_SIZE, RESCALE
 
 
 def _pad_perm_mats_with_dustbin(mats, ns_pairs):
@@ -30,26 +31,9 @@ def _pad_perm_mats_with_dustbin(mats, ns_pairs):
     return out, mask
 
 
-def _standardize(image, annotation):
-    """Resize to 320x320 and center crop to 240x320."""
-    h, w = image.shape[:2]
-    resized = cv2.resize(image, (320, 320))
-    scale_x, scale_y = 320 / w, 320 / h
-    annos = [[id_, x * scale_x, y * scale_y] for id_, x, y in annotation]
-    crop_h, crop_w = 240, 320
-    start_x = (320 - crop_w) // 2
-    start_y = (320 - crop_h) // 2
-    cropped = resized[start_y:start_y + crop_h, start_x:start_x + crop_w]
-    cropped_annos = [
-        [id_, x - start_x, y - start_y]
-        for id_, x, y in annos
-        if start_x <= x < start_x + crop_w and start_y <= y < start_y + crop_h
-    ]
-    return cropped, cropped_annos
 
 
-
-RESCALE=(320, 240)
+RESCALE=RESCALE
 SRC_GRAPH_CONSTRUCT="tri"
 TGT_GRAPH_CONSTRUCT="tri"
 SYM_ADJACENCY=True
@@ -248,9 +232,9 @@ class GMDataset(Dataset):
 
     @staticmethod
     def to_pyg_graph(A, P):
-        rescale = max(RESCALE)
+        coord_scale = max(CROPSIZE)
 
-        edge_feat = 0.5 * (np.expand_dims(P, axis=1) - np.expand_dims(P, axis=0)) / rescale + 0.5  # from Rolink's paper
+        edge_feat = 0.5 * (np.expand_dims(P, axis=1) - np.expand_dims(P, axis=0)) / coord_scale + 0.5  # from Rolink's paper
         edge_index = np.nonzero(A)
         edge_attr = edge_feat[edge_index]
 
@@ -261,7 +245,7 @@ class GMDataset(Dataset):
         hyperedge_index = np.nonzero(o3_A)
 
         pyg_graph = pyg.data.Data(
-            x=torch.tensor(P / rescale).to(torch.float32),
+            x=torch.tensor(P / coord_scale).to(torch.float32),
             edge_index=torch.tensor(np.array(edge_index), dtype=torch.long),
             edge_attr=torch.tensor(edge_attr).to(torch.float32),
             hyperedge_index=torch.tensor(np.array(hyperedge_index), dtype=torch.long),
@@ -401,27 +385,6 @@ def collate_fn(data: list):
     """
     Create mini-batch data for training.
     """
-    def pad_tensor(inp):
-        assert type(inp[0]) == torch.Tensor
-        it = iter(inp)
-        t = next(it)
-        max_shape = list(t.shape)
-        while True:
-            try:
-                t = next(it)
-                for i in range(len(max_shape)):
-                    max_shape[i] = int(max(max_shape[i], t.shape[i]))
-            except StopIteration:
-                break
-        max_shape = np.array(max_shape)
-        padded_ts = []
-        for t in inp:
-            pad_pattern = np.zeros(2 * len(max_shape), dtype=np.int64)
-            pad_pattern[::-2] = max_shape - np.array(t.shape)
-            pad_pattern = tuple(pad_pattern.tolist())
-            padded_ts.append(F.pad(t, pad_pattern, 'constant', 0))
-        return padded_ts
-
     def stack(inp):
         if type(inp[0]) == list:
             ret = []

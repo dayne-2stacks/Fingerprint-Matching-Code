@@ -36,7 +36,11 @@ class Encoder(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.layers = nn.ModuleList([EncoderLayer(**self.model_params)])
+        self.layers = nn.ModuleList([
+            EncoderLayer(**self.model_params),
+            EncoderLayer(**self.model_params),
+            EncoderLayer(**self.model_params),
+            ])
 
     def forward(self, row_emb, col_emb, cost_mat):
         """

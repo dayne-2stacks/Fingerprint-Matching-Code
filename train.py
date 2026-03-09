@@ -20,12 +20,12 @@ from src.model.ngm import (
 )
 from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
-from src.loss_func import PermutationLoss, PermutationLossHung, FocalLoss
+from src.loss_func import WeightedPermLoss, PermutationLoss, PermutationLossHung, FocalLoss
 from utils.models_sl import save_model, load_model, load_optimizer
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 from src.evaluation_metric import matching_accuracy
 from utils.scheduler import WarmupScheduler
-from src.model.dustbin import strip_dustbin_by_ns
+from src.model.dustbin import ns_pair_to_ints, strip_dustbin_from_outputs
 # Utility function for generating cv2.DMatch lists
 from utils.matching import build_matches
 # from apex import amp
@@ -68,123 +68,49 @@ def _stage_group_label(stage: int) -> str:
     return "full"
 
 
-STAGE_CONFIG_FILES = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
+# STAGE_CONFIG_FILES = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
+# STAGE_CONFIG_FILES = ["stage1.yml"]
+# STAGE_CONFIG_FILES = ["stage2.yml", "stage3.yml"]
+STAGE_CONFIG_FILES = ["stage4.yml"]
 
-STAGE_TRAIN_REQUIRED_KEYS = {
-    "OUTPUT_PATH",
-    "LR",
-    "K_LR",
-    "BACKBONE_LR",
-    "num_iterations",
-    "patience",
-}
-STAGE_TRAIN_OPTIONAL_KEYS = {
-    "PRETRAINED_PATH",
-    "CHECKPOINT_PATH",
-    "LOG_DIR",
-    "start_epoch",
-}
-STAGE_NGM_REQUIRED_KEYS = {"REGRESSION", "DUSTBIN_REJECT_ENABLE"}
-STAGE_NGM_OPTIONAL_KEYS = set()
-
-STAGE_INVARIANT_TRAIN = {
-    "num_epochs": 50,
-    "BATCH_SIZE": 8,
-    "OVERFIT_TO_TRAIN_SPLIT": False,
-    "BM_NAME": "L3SFV2AugmentedBenchmark",
-    "FILTER": None,
-    "WARMUP_EPOCHS": 3,
-    "WARMUP_K_EPOCHS": 2,
-    "LR_DECAY": 0.5,
-    "PRETRAINED_PATH": "",
-    "CHECKPOINT_PATH": "checkpoints",
-    "LOG_DIR": "logs/tensorboard",
-    "start_epoch": 0,
-}
-
-STAGE_INVARIANT_POLICY = {
-    "TRAIN_USE_PRED_K": False,
-    "PERM_LOSS": "focal",
-    "FOCAL_GAMMA": 2.0,
-    "DUSTBIN_LOSS_WEIGHT": 0.5,
-    "DUSTBIN_REJECT_MARGIN": 0.0,
-    "DETECT_ANOMALY": False,
-}
-
-STAGE_DATA_INVARIANTS = {
-    "dataset_len": 640,
-    "train_root": "dataset/Synthetic",
-}
+GLOBAL_CONFIG_FILE = "config.yml"
 
 
-def _validate_section_keys(section_name, section_cfg, *, required_keys, optional_keys, cfg_file):
-    section_keys = set(section_cfg.keys())
-    missing = sorted(required_keys - section_keys)
-    unknown = sorted(section_keys - required_keys - optional_keys)
-    if missing:
-        raise ValueError(
-            f"{cfg_file}: missing required keys in '{section_name}': {missing}"
-        )
-    if unknown:
-        raise ValueError(
-            f"{cfg_file}: unknown keys in '{section_name}': {unknown}"
-        )
-
-
-def _require_dict_section(raw_cfg, section_name, cfg_file):
-    if section_name not in raw_cfg:
-        raise ValueError(f"{cfg_file}: missing top-level section '{section_name}'")
-    section = raw_cfg[section_name]
-    if not isinstance(section, dict):
-        raise ValueError(f"{cfg_file}: section '{section_name}' must be a mapping")
-    return section
-
-
-def _load_stage_config(cfg_file):
+def _load_global_config(cfg_file=GLOBAL_CONFIG_FILE):
     with open(cfg_file, "r") as f:
         raw_cfg = yaml.safe_load(f) or {}
     if not isinstance(raw_cfg, dict):
-        raise ValueError(f"{cfg_file}: expected top-level mapping")
+        raw_cfg = {}
 
-    unknown_top_level = sorted(set(raw_cfg.keys()) - {"train", "ngm"})
-    if unknown_top_level:
-        raise ValueError(f"{cfg_file}: unknown top-level keys: {unknown_top_level}")
+    return {
+        "train_defaults": raw_cfg.get("train_defaults", {}),
+        "policy_defaults": raw_cfg.get("policy_defaults", {}),
+        "data_defaults": raw_cfg.get("data_defaults", {}),
+    }
 
-    train_cfg = _require_dict_section(raw_cfg, "train", cfg_file)
-    ngm_cfg = _require_dict_section(raw_cfg, "ngm", cfg_file)
 
-    _validate_section_keys(
-        "train",
-        train_cfg,
-        required_keys=STAGE_TRAIN_REQUIRED_KEYS,
-        optional_keys=STAGE_TRAIN_OPTIONAL_KEYS,
-        cfg_file=cfg_file,
-    )
-    _validate_section_keys(
-        "ngm",
-        ngm_cfg,
-        required_keys=STAGE_NGM_REQUIRED_KEYS,
-        optional_keys=STAGE_NGM_OPTIONAL_KEYS,
-        cfg_file=cfg_file,
-    )
+def _load_stage_config(cfg_file, global_cfg):
+    with open(cfg_file, "r") as f:
+        raw_cfg = yaml.safe_load(f) or {}
+    if not isinstance(raw_cfg, dict):
+        raw_cfg = {}
 
-    cfg = dict(STAGE_INVARIANT_TRAIN)
-    cfg.update(STAGE_INVARIANT_POLICY)
+    train_cfg = raw_cfg.get("train", {})
+    if not isinstance(train_cfg, dict):
+        train_cfg = {}
+    ngm_cfg = raw_cfg.get("ngm", {})
+    if not isinstance(ngm_cfg, dict):
+        ngm_cfg = {}
+
+    cfg = dict(global_cfg.get("train_defaults", {}))
+    cfg.update(global_cfg.get("policy_defaults", {}))
+    cfg.update(train_cfg)
     cfg.update(
         {
-            "OUTPUT_PATH": train_cfg["OUTPUT_PATH"],
-            "LR": train_cfg["LR"],
-            "K_LR": train_cfg["K_LR"],
-            "BACKBONE_LR": train_cfg["BACKBONE_LR"],
-            "num_iterations": train_cfg["num_iterations"],
-            "patience": train_cfg["patience"],
-            "REGRESSION": bool(ngm_cfg["REGRESSION"]),
-            "DUSTBIN_REJECT_ENABLE": bool(ngm_cfg["DUSTBIN_REJECT_ENABLE"]),
+            "REGRESSION": bool(ngm_cfg.get("REGRESSION", False)),
+            "DUSTBIN_REJECT_ENABLE": bool(ngm_cfg.get("DUSTBIN_REJECT_ENABLE", False)),
         }
     )
-    for key in STAGE_TRAIN_OPTIONAL_KEYS:
-        if key in train_cfg:
-            cfg[key] = train_cfg[key]
     return cfg
 
 
@@ -208,7 +134,6 @@ def _collect_param_groups(model):
             groups["backbone_edge"].append(param)
         else:
             groups["matcher"].append(param)
-
     return groups
 
 
@@ -228,10 +153,22 @@ def _configure_stage_trainability(model, stage):
         _set_trainable(groups["matcher"], True)
         _set_trainable(groups["backbone_node"], True)
         _set_trainable(groups["backbone_edge"], True)
+
+        _set_trainable(groups["k_head"], False)
+        _set_trainable(groups["dustbin"], False)
     elif stage == 2:
+        _set_trainable(groups["matcher"], False)
+        _set_trainable(groups["backbone_node"], False)
+        _set_trainable(groups["backbone_edge"], False)
         # Stage 2: keep matcher stable; train K.
         _set_trainable(groups["k_head"], True)
+        _set_trainable(groups["dustbin"], False)
+
     elif stage == 3:
+        _set_trainable(groups["matcher"], False)
+        _set_trainable(groups["k_head"], False)
+        _set_trainable(groups["backbone_node"], False)
+        _set_trainable(groups["backbone_edge"], False)
         # Stage 3: train dustbin only.
         _set_trainable(groups["dustbin"], True)
     elif stage == 4:
@@ -289,7 +226,7 @@ def _build_optimizers(model, groups, lr, backbone_lr, k_lr):
             optimizer = optim.AdamW(
                 [{"params": k_params, "lr": float(k_lr), "base_lr": float(k_lr), "name": "k_head"}],
                 lr=float(k_lr),
-                weight_decay=1e-6,
+                weight_decay=1e-4,
             )
             return optimizer, None
         raise RuntimeError("No trainable parameters were selected for the main optimizer.")
@@ -300,9 +237,8 @@ def _build_optimizers(model, groups, lr, backbone_lr, k_lr):
         optimizer_k = optim.AdamW(
             [{"params": k_params, "lr": float(k_lr), "base_lr": float(k_lr), "name": "k_head"}],
             lr=float(k_lr),
-            weight_decay=1e-6,
+            weight_decay=1e-4,
         )
-
     return optimizer, optimizer_k
 
 
@@ -318,6 +254,7 @@ def _default_pretrained_path(stage_output_paths, stage):
     source_output_path = stage_output_paths.get(int(source_stage), "")
     if not source_output_path:
         return ""
+    print(f"Stage {stage} default pretrained path: {source_output_path}")
     return str(Path(source_output_path) / "params" / "best_model.pt")
 
 
@@ -331,9 +268,17 @@ def _collect_stage_output_paths(config_file_list, stage_configs):
     return stage_output_paths
 
 
+global_cfg = _load_global_config(GLOBAL_CONFIG_FILE)
 config_files = list(STAGE_CONFIG_FILES)
-stage_configs = {cfg_file: _load_stage_config(cfg_file) for cfg_file in config_files}
+stage_configs = {cfg_file: _load_stage_config(cfg_file, global_cfg) for cfg_file in config_files}
 stage_output_paths = _collect_stage_output_paths(config_files, stage_configs)
+global_defaults_log = {
+    "config_file": GLOBAL_CONFIG_FILE,
+    "train_defaults": global_cfg["train_defaults"],
+    "policy_defaults": global_cfg["policy_defaults"],
+    "data_defaults": global_cfg["data_defaults"],
+}
+print(f"Loaded global defaults: {global_defaults_log}")
 
 
 for file in config_files:
@@ -386,57 +331,31 @@ for file in config_files:
 
     REGRESSION = bool(stage_cfg["REGRESSION"])
     TRAIN_USE_PRED_K = bool(stage_cfg["TRAIN_USE_PRED_K"])
-    PERM_LOSS = stage_cfg["PERM_LOSS"]
-    FOCAL_GAMMA = float(stage_cfg["FOCAL_GAMMA"])
     DUSTBIN_LOSS_WEIGHT = float(stage_cfg["DUSTBIN_LOSS_WEIGHT"])
+    DUSTBIN_K_MSE_WEIGHT = float(stage_cfg.get("DUSTBIN_K_MSE_WEIGHT", 1.0))
     DUSTBIN_REJECT_ENABLE = bool(stage_cfg["DUSTBIN_REJECT_ENABLE"])
     DUSTBIN_REJECT_MARGIN = float(stage_cfg["DUSTBIN_REJECT_MARGIN"])
     DETECT_ANOMALY = bool(stage_cfg["DETECT_ANOMALY"])
+    FOCAL_GAMMA = float(stage_cfg.get("FOCAL_GAMMA", 1.0))
+    STAGE1_SS_BASE_AUX_WEIGHT = float(stage_cfg.get("STAGE1_SS_BASE_AUX_WEIGHT", 0.25))
 
     print("BACKBONE_LR =", BACKBONE_LR)
     print("Start epoch: ", start_epoch)
-    minimal_cfg = {
-        "LR": LR,
-        "K_LR": K_LR,
-        "num_epochs": num_epochs,
-        "num_iterations": num_iterations,
-        "BATCH_SIZE": BATCH_SIZE,
-        "BM_NAME": BM_NAME,
-        "OVERFIT_TO_TRAIN_SPLIT": OVERFIT_TO_TRAIN_SPLIT,
-        "OUTPUT_PATH": OUTPUT_PATH,
-        "PRETRAINED_PATH": PRETRAINED_PATH,
-        "CHECKPOINT_PATH": CHECKPOINT_PATH,
-        "STAGE_GROUP": stage_group,
-        "REGRESSION": REGRESSION,
-        "TRAIN_USE_PRED_K": TRAIN_USE_PRED_K,
-    }
-    derived_cfg = {
-        "BACKBONE_LR": BACKBONE_LR,
-        "LR_DECAY": LR_DECAY,
-        "patience": patience,
-        "PERM_LOSS": PERM_LOSS,
-        "FOCAL_GAMMA": FOCAL_GAMMA,
-        "DUSTBIN_LOSS_WEIGHT": DUSTBIN_LOSS_WEIGHT,
-        "DUSTBIN_REJECT_ENABLE": DUSTBIN_REJECT_ENABLE,
-        "DUSTBIN_REJECT_MARGIN": DUSTBIN_REJECT_MARGIN,
-        "STAGE_GROUP": stage_group,
-        "WARMUP_EPOCHS": WARMUP_EPOCHS,
-        "WARMUP_K_EPOCHS": WARMUP_K_EPOCHS,
-        "DETECT_ANOMALY": DETECT_ANOMALY,
-    }
-    print(f"[Stage {stage}] config={minimal_cfg} defaults={derived_cfg}")
+    if stage == 1:
+        print("STAGE1_SS_BASE_AUX_WEIGHT =", STAGE1_SS_BASE_AUX_WEIGHT)
+
     
     # =====================================================
     # Hard-Coded and Derived Parameters
     # =====================================================
-    dataset_len = int(STAGE_DATA_INVARIANTS["dataset_len"])
+    dataset_len = int(global_cfg["data_defaults"]["dataset_len"])
 
     best_loss = float('inf')
     no_improvement_count = 0
 
     # File paths
     # Default to the synthetic dataset; override for stage 6
-    train_root = STAGE_DATA_INVARIANTS["train_root"]
+    train_root = str(global_cfg["data_defaults"]["train_root"])
     # OUTPUT_PATH = "results/base"
 
     # =====================================================
@@ -447,7 +366,16 @@ for file in config_files:
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
-    logger.info("[Stage %s] config=%s defaults=%s", stage, minimal_cfg, derived_cfg)
+    if DUSTBIN_LOSS_WEIGHT >= DUSTBIN_K_MSE_WEIGHT:
+        warn_msg = (
+            "Configured dustbin BCE weight is not lower than OT-K MSE weight: "
+            f"DUSTBIN_LOSS_WEIGHT={DUSTBIN_LOSS_WEIGHT}, "
+            f"DUSTBIN_K_MSE_WEIGHT={DUSTBIN_K_MSE_WEIGHT}. "
+            "This is allowed, but the intended default is BCE < OT-K MSE."
+        )
+        print(f"[WARN] {warn_msg}")
+        logger.warning(warn_msg)
+
 
    
 
@@ -468,17 +396,14 @@ for file in config_files:
     model = Net(
         regression=REGRESSION,
         dustbin_loss_weight=DUSTBIN_LOSS_WEIGHT,
+        dustbin_k_mse_weight=DUSTBIN_K_MSE_WEIGHT,
         dustbin_reject_enable=DUSTBIN_REJECT_ENABLE,
         dustbin_reject_margin=DUSTBIN_REJECT_MARGIN,
         train_use_pred_k=TRAIN_USE_PRED_K,
     )
-    perm_loss_key = str(PERM_LOSS).strip().lower()
-    if perm_loss_key == "focal":
-        criterion = FocalLoss(gamma=float(FOCAL_GAMMA))
-    elif perm_loss_key in {"hung", "hungarian"}:
-        criterion = PermutationLossHung()
-    else:
-        criterion = PermutationLoss()
+
+    # criterion = FocalLoss(gamma=FOCAL_GAMMA)
+    criterion = PermutationLossHung()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -515,9 +440,14 @@ for file in config_files:
     # scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
-                                            #    last_epoch=-1)
-    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=LR_DECAY)
+                                            #    last_epoch=-1)    
+    # main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=LR_DECAY)
+    # if stage in ( 2, 3):
+    #     main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=LR * 1e-3)
+    # scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
+    main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30, eta_min=LR * 1e-3)
     scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
+
     if optimizer_k is not None:
         main_scheduler_k = optim.lr_scheduler.ReduceLROnPlateau(optimizer_k, patience=1, factor=LR_DECAY)
         scheduler_k = WarmupScheduler(optimizer_k, warmup_epochs=warmup_k_epochs, after_scheduler=main_scheduler_k)
@@ -535,6 +465,7 @@ for file in config_files:
             optim_k_path = str(checkpoint_path / f'optim_k_{start_epoch:04}.pt')
         
     if len(PRETRAINED_PATH) > 0:
+        print(f"Using explicitly configured pretrained path: {PRETRAINED_PATH}")
         model_path = PRETRAINED_PATH
     elif start_epoch == 0:
         default_pretrained = _default_pretrained_path(stage_output_paths, stage)
@@ -574,7 +505,7 @@ for file in config_files:
     #     load_model(model, best_model_path)
                 
     
-
+    last_epoch = 0
     # =====================================================
     # Training Loop
     # =====================================================
@@ -585,9 +516,9 @@ for file in config_files:
         print("-" * 10)
 
         model.train()
-        if stage in (1, 2, 3):
-            # Stages with partial freezing should keep BN running stats fixed.
-            model.apply(_set_batchnorm_eval)
+        # if stage in (1, 2, 3):
+        #     # Stages with partial freezing should keep BN running stats fixed.
+        #     model.apply(_set_batchnorm_eval)
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
         if optimizer_k is not None:
             print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))
@@ -617,6 +548,7 @@ for file in config_files:
             checkpoint_path,
             detect_anomaly=DETECT_ANOMALY,
             max_iters=num_iterations,
+            stage1_ss_base_aux_weight=STAGE1_SS_BASE_AUX_WEIGHT,
         )
             
         # =====================================================
@@ -631,6 +563,7 @@ for file in config_files:
             epoch,
             logger,
             stage,
+            stage1_ss_base_aux_weight=STAGE1_SS_BASE_AUX_WEIGHT,
         )
     
         
@@ -658,9 +591,20 @@ for file in config_files:
                 prev_k_lr = [group['lr'] for group in optimizer_k.param_groups]
 
         # Step LR schedulers
-        scheduler.step(avg_val_loss)
+        if stage == 2:
+            # scheduler.step(avg_ks_loss)
+            scheduler.step()
+        elif stage == 3:
+            # scheduler.step(avg_val_total)
+            scheduler.step()
+
+        else:
+            # scheduler.step(avg_val_loss)
+            scheduler.step()
+
         if optimizer_k is not None:
-            scheduler_k.step(avg_ks_loss)
+            # scheduler_k.step()
+            scheduler_k.step(avg_ks_loss)   
 
 
         # Detect LR reduction for main optimizer
@@ -672,20 +616,21 @@ for file in config_files:
             print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
             best_model_path = str(checkpoint_path / "best_model.pt")
             load_model(model, best_model_path)
+
+        last_epoch = epoch
             
        
         
-        # ---- Test Evaluation Periodically ----
-        if epoch % 10 == 9:
-            test_evaluation(
-                model,
-                test_dataloader,
-                criterion,
-                device,
-                writer,
-                epoch,
-                stage,
-            )
+    # ---- Test Evaluation Periodically ----
+    test_evaluation(
+        model,
+        test_dataloader,
+        criterion,
+        device,
+        writer,
+        last_epoch,
+        stage,
+    )
     
     # Close the TensorBoard writer at the end of this training stage
     writer.close()
@@ -705,18 +650,7 @@ model.eval()
 with torch.no_grad():
     outputs = model(single_sample)
 
-if outputs.get("has_dustbin", False):
-    n1 = outputs["ns"][0] - 1
-    n2 = outputs["ns"][1] - 1
-else:
-    n1 = outputs["ns"][0]
-    n2 = outputs["ns"][1]
-
-outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
-outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
-if "gt_perm_mat" in outputs:
-    outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
-outputs["ns"] = [n1, n2]
+strip_dustbin_from_outputs(outputs)
     
 acc = matching_accuracy(outputs['perm_mat'], outputs['gt_perm_mat'], outputs['ns'], idx=0)
 if isinstance(acc, torch.Tensor):
@@ -739,16 +673,7 @@ else:
 print("Number of keypoints in image0 (kp0):", len(kp0))
 print("Number of keypoints in image1 (from kp1):", kp1.shape[0])
 
-n1 = outputs["ns"][0]
-n2 = outputs["ns"][1]
-if isinstance(n1, torch.Tensor):
-    n1 = int(n1[0].item()) if n1.dim() > 0 else int(n1.item())
-else:
-    n1 = int(n1)
-if isinstance(n2, torch.Tensor):
-    n2 = int(n2[0].item()) if n2.dim() > 0 else int(n2.item())
-else:
-    n2 = int(n2)
+n1, n2 = ns_pair_to_ints(outputs, sample_idx=0)
 kp0 = kp0[:n1]
 kp1 = kp1[:n2]
 

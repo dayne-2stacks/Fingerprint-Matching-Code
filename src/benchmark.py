@@ -13,6 +13,8 @@ import re
 from scipy.sparse import coo_matrix
 from abc import ABC, abstractmethod
 
+from src.gmdataset import RESCALE
+
 
 PAIRING_TASK = "classify"
 ONLY_GENUINE_PAIRS = False
@@ -91,7 +93,6 @@ class ClassifyPairs:
         pair_count = min(len(genuine_pairs), len(imposter_pairs))
         if pair_count == 0:
             return []
-
         pairs = random.sample(
             random.sample(genuine_pairs, pair_count) +
             random.sample(imposter_pairs, pair_count),
@@ -173,13 +174,15 @@ class SessionStancePairMixin(ABC):
             random.shuffle(pairs)
             return pairs
 
+        if self.sets == 'train':
+            return _mix_pairs_with_ratio(genuine_pairs, imposter_pairs, TRAIN_GENUINE_RATIO)
+
         pair_count = min(len(genuine_pairs), len(imposter_pairs))
         if pair_count == 0:
             return []
         random.shuffle(genuine_pairs)
         random.shuffle(imposter_pairs)
         pairs = genuine_pairs[:pair_count] + imposter_pairs[:pair_count]
-        # pairs = genuine_pairs + imposter_pairs
         random.shuffle(pairs)
         return pairs
 
@@ -208,7 +211,7 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
     def _build_classify_pairs(self):
         raise NotImplementedError
 
-    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+    def __init__(self, sets, obj_resize=RESCALE, problem='2GM',
                  filter=None, task='classify', dataset_cls=L3SFV2AugmentedDataset,
                  name=None, **args):
         task = PAIRING_TASK
@@ -524,7 +527,7 @@ class L3SFV2AugmentedBenchmark(ClassifyPairs, FingerprintBenchmarkBase):
 class L3SFBenchmark(SessionStancePairMixin, FingerprintBenchmarkBase):
     """Benchmark for the L3SF dataset with classification pair logic."""
 
-    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+    def __init__(self, sets, obj_resize=RESCALE, problem='2GM',
                  filter=None, task='match', **args):
         super().__init__(
             sets,
@@ -559,7 +562,7 @@ class L3SFBenchmark(SessionStancePairMixin, FingerprintBenchmarkBase):
 class PolyUDBIIBenchmark(PolyUIdParseMixin, SessionStancePairMixin, FingerprintBenchmarkBase):
     """Benchmark for the PolyU DBII dataset with classification pair logic."""
 
-    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+    def __init__(self, sets, obj_resize=RESCALE, problem='2GM',
                  filter=None, task='match', **args):
         super().__init__(
             sets,
@@ -576,7 +579,7 @@ class PolyUDBIIBenchmark(PolyUIdParseMixin, SessionStancePairMixin, FingerprintB
 class PolyUDBIBenchmark(PolyUIdParseMixin, SessionStancePairMixin, FingerprintBenchmarkBase):
     """Benchmark for the PolyU DBI dataset with classification pair logic."""
 
-    def __init__(self, sets, obj_resize=(512, 512), problem='2GM',
+    def __init__(self, sets, obj_resize=RESCALE, problem='2GM',
                  filter=None, task='match', **args):
         super().__init__(
             sets,
@@ -633,7 +636,7 @@ def main():
     parser.add_argument("--sets", choices=("train", "val", "test"), default="train")
     parser.add_argument("--task", choices=("match", "classify"), default="match")
     parser.add_argument("--train-root", default=None, help="Root dir for dataset (train/val/test subdirs if used).")
-    parser.add_argument("--obj-resize", type=int, nargs=2, default=(320, 240), metavar=("W", "H"))
+    parser.add_argument("--obj-resize", type=int, nargs=2, default=RESCALE, metavar=("W", "H"))
     parser.add_argument("--pair-size", type=int, default=2)
     args = parser.parse_args()
 

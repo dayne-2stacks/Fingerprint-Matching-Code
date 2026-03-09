@@ -1,12 +1,12 @@
-import math
 import torch
 
 class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer, warmup_epochs, after_scheduler):
-        self.warmup_epochs = warmup_epochs
+        self.warmup_epochs = max(int(warmup_epochs), 0)
         self.after_scheduler = after_scheduler
         self.finished = False
         super().__init__(optimizer)
+        self._last_lr = [group["lr"] for group in optimizer.param_groups]
 
     def get_lr(self):
         if self.last_epoch < self.warmup_epochs:

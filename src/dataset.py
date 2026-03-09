@@ -27,10 +27,12 @@ import csv
 from abc import ABC, abstractmethod
 from pathlib import Path
 from PIL import Image
+from src.gmdataset import RESCALE
+from utils.data import train_test_split
 
 
 class BaseFingerprintDataset(ABC):
-    def __init__(self, sets, obj_resize=(512, 512), train_root=None,
+    def __init__(self, sets, obj_resize=RESCALE, train_root=None,
                  test_root=None, val_root=None, cache_path='cache', task='match'):
         """
         Initialize the dataset.
@@ -115,8 +117,9 @@ class BaseFingerprintDataset(ABC):
     def _get_bounds(self, img_path: Path):
         with Image.open(str(img_path)) as img:
             width, height = img.size
-        xmax = 320 if width > 320 else width
-        ymax = 240 if height > 240 else height
+        resize_w, resize_h = self.obj_resize
+        xmax = resize_w if width > resize_w else width
+        ymax = resize_h if height > resize_h else height
         return [0, 0, xmax, ymax]
 
     def _augment_anno(self, anno: dict, img_path: Path) -> None:
@@ -345,7 +348,7 @@ class L3SFV2AugmentedDataset(
     KeypointsFromAnnotationMixin,
     BaseFingerprintDataset,
 ):
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/Synthetic',
+    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/Synthetic',
                  test_root=None, val_root=None, cache_path='cache', task='classify'):
         self.output_dir =  Path("data/L3SFV2AugmentedDataset")
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)   
@@ -356,9 +359,11 @@ class PolyUDBII(
     KeypointsFromAnnotationMixin,
     BaseFingerprintDataset,
 ):
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU/DBII',
+    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/PolyU/DBII',
                  test_root=None, val_root=None, cache_path='cache', task='match'):
         self.output_dir = Path("data/PolyU-DBII")
+        if not os.path.exists(train_root):
+            train_test_split(train_root, img_path='dataset/polyU/DBII')
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
 
 
@@ -367,7 +372,7 @@ class PolyUDBI(PolyUDBII):
     PolyUDBI dataset class, inheriting from PolyUDBII.
     This class can be used to handle the PolyUDBI dataset with similar functionality.
     """
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/PolyU/DBI',
+    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/PolyU/DBI',
                  test_root=None, val_root=None, cache_path='cache', task='match'):
         self.output_dir = Path("data/PolyU-DBI")
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
@@ -378,16 +383,16 @@ class L3SF(
     KeypointsFromAnnotationMixin,
     BaseFingerprintDataset,
 ):
-    def __init__(self, sets, obj_resize=(512, 512), train_root='dataset/L3-SF',
+    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/L3-SF',
                  test_root=None, val_root=None, cache_path='cache', task='match'):
         self.output_dir = Path("data/L3-SF")
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
 if __name__ == "__main__":
     # For training, images (and their corresponding csv files) are assumed to be in /green/data/L3SF in folders R1–R5.
-    dataset_train = L3SFV2AugmentedDataset(
+    dataset_train = PolyUDBII(
         sets='train',
-        obj_resize=(320, 240),
+        obj_resize=RESCALE,
     )
     # Build or reuse the processed JSON annotations file
     json_path = dataset_train.to_json()

@@ -1,5 +1,5 @@
 from src.benchmark import L3SFV2AugmentedBenchmark, L3SFBenchmark
-from src.gmdataset import GMDataset, get_dataloader
+from src.gmdataset import RESCALE, GMDataset, get_dataloader
 
 
 def build_dataloaders(
@@ -24,21 +24,21 @@ def build_dataloaders(
 
     benchmark = BM(
         sets=train_split,
-        obj_resize=(320, 240),
+        obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
     )
 
     test_bm = BM(
         sets=test_split,
-        obj_resize=(320, 240),
+        obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
     )
 
     val_bm = BM(
         sets=val_split,
-        obj_resize=(320, 240),
+        obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
     )

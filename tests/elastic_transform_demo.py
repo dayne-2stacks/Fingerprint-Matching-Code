@@ -1,136 +1,151 @@
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+import math
+import random
+
 import cv2
 import numpy as np
-import os
-from utils.augmentation import bilinear_sample_displacement
 
-def apply_elastic_transform(image, annotation, sigma=None, alpha=None):
-    """Apply elastic transform to an image and its annotations."""
-    h, w = image.shape[:2]
-    
-    # Use default values if not provided
-    if sigma is None:
-        sigma = np.random.uniform(3, 6)
-    if alpha is None:
-        alpha = np.random.uniform(8, 15)
+from utils.augmentation import apply_single_transform, transforms as AUG_TRANSFORMS
 
-    # Random displacement fields
-    dx = np.random.rand(h, w) * 2 - 1
-    dy = np.random.rand(h, w) * 2 - 1
-    dx = cv2.GaussianBlur(dx, (0, 0), sigma) * alpha
-    dy = cv2.GaussianBlur(dy, (0, 0), sigma) * alpha
 
-    # Apply to image
-    x_coords, y_coords = np.meshgrid(np.arange(w), np.arange(h))
-    map_x = (x_coords + dx).astype(np.float32)
-    map_y = (y_coords + dy).astype(np.float32)
+def read_annotations(image_path: Path, sample_stride: int = 20):
+    """Read annotations from sibling .tsv/.csv/.txt and subsample for clarity."""
+    for ext in (".tsv", ".csv", ".txt"):
+        ann_path = image_path.with_suffix(ext)
+        if not ann_path.exists():
+            continue
+        annotations = []
+        with ann_path.open("r") as f:
+            for i, line in enumerate(f):
+                if i % max(1, sample_stride) != 0:
+                    continue
+                parts = line.strip().replace(",", "\t").split("\t")
+                if len(parts) < 2:
+                    continue
+                try:
+                    x = float(parts[0])
+                    y = float(parts[1])
+                    annotations.append([i, x, y])
+                except ValueError:
+                    continue
+        if annotations:
+            return annotations
+    return []
 
-    transformed_image = cv2.remap(image, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
-    # Apply to annotations using bilinear sampling
-    transformed_annotations = []
-    for id_, x, y in annotation:
-        if 0 <= x < w and 0 <= y < h:
-            new_x = x + bilinear_sample_displacement(dx, x, y)
-            new_y = y + bilinear_sample_displacement(dy, x, y)
-            if 0 <= new_x < w and 0 <= new_y < h:
-                transformed_annotations.append([id_, new_x, new_y])
-                
-    return transformed_image, transformed_annotations
-
-def draw_annotations(image, annotations, radius=5, color=(0, 255, 0), thickness=2):
-    """Draw circles around annotations on an image."""
-    annotated_image = image.copy()
-    for id_, x, y in annotations:
-        # Convert to integers for cv2.circle
-        x, y = int(round(x)), int(round(y))
-        # Draw circle around the annotation
-        cv2.circle(annotated_image, (x, y), radius, color, thickness)
-        # Add ID text
-        cv2.putText(annotated_image, str(id_), (x+radius, y), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-    return annotated_image
-
-def load_sample_image(path=None):
-    """Load a sample image and annotations."""
-    if path and os.path.exists(path):
-        # Load from specified path
-        image = cv2.imread(path)
+def draw_annotations(image, annotations, radius=3, color=(0, 255, 0)):
+    if image.ndim == 2:
+        annotated = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
-        # Create a placeholder fingerprint-like image
-        image = np.ones((240, 320), dtype=np.uint8) * 200  # Light gray background
-        # Add some random lines to simulate fingerprint ridges
-        for _ in range(100):
-            pt1 = (np.random.randint(0, 320), np.random.randint(0, 240))
-            pt2 = (pt1[0] + np.random.randint(-30, 30), pt1[1] + np.random.randint(-30, 30))
-            cv2.line(image, pt1, pt2, (100,), 1)
-        
-        # Add noise
-        noise = np.random.normal(0, 10, image.shape).astype(np.int8)
-        image = np.clip(image + noise, 0, 255).astype(np.uint8)
-        
-    # Generate sample annotations (minutiae points)
-    h, w = image.shape[:2]
-    # Try to load annotations from a TSV file with the same stem as the image
-    annotations = []
-    if path:
-        stem, _ = os.path.splitext(path)
-        print(f"Looking for annotations in {stem}.tsv")
-        tsv_path = stem + ".tsv"
-        if os.path.exists(tsv_path):
-            with open(tsv_path, "r") as f:
-                counter = 0
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        try:
-                            _id = counter
-                            x = float(parts[0])
-                            y = float(parts[1])
-                            if counter % 20 == 0:  # Sample every 20th point
-                                annotations.append([ _id, x, y])
-                            counter += 1
-                        except ValueError:
-                            continue
-    if not annotations:
-        # Generate random annotations if TSV not found
-        for i in range(10):
-            x = np.random.randint(20, w-20)
-            y = np.random.randint(20, h-20)
-            annotations.append([i, x, y])
+        annotated = image.copy()
+    for idx, x, y in annotations:
+        cx, cy = int(round(x)), int(round(y))
+        cv2.circle(annotated, (cx, cy), radius, color, -1, lineType=cv2.LINE_AA)
+        cv2.putText(
+            annotated,
+            str(idx),
+            (cx + radius + 2, cy - 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return annotated
 
-    # Convert to RGB for better visualization if grayscale
-    # if len(image.shape) == 2:
-    #     image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    # elif image.shape[2] == 3:
-    #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    return image, annotations
+
+def add_tile_label(image, label):
+    out = image.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.55
+    thickness = 1
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
+    pad = 5
+    cv2.rectangle(out, (0, 0), (tw + 2 * pad, th + 2 * pad), (0, 0, 0), -1)
+    cv2.putText(out, label, (pad, th + pad - 1), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    return out
+
+
+def make_grid(images, cols):
+    h, w = images[0].shape[:2]
+    rows = math.ceil(len(images) / cols)
+    canvas = np.zeros((rows * h, cols * w, 3), dtype=np.uint8)
+    for i, img in enumerate(images):
+        r, c = divmod(i, cols)
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        canvas[r * h:(r + 1) * h, c * w:(c + 1) * w] = img
+    return canvas
+
+
+def pick_default_image():
+    candidates = sorted(Path("dataset/Synthetic/R1").glob("*.jpg"))
+    if candidates:
+        return candidates[0]
+    raise FileNotFoundError("No default image found in dataset/Synthetic/R1. Pass --image.")
+
 
 def main():
-    # Load image and annotations
-    image_path = "/gold/home/dayneguy/Fingerprint/dataset/Synthetic/R1/1_left_loop.jpg"  # Modify this if you have a specific image
-    image, annotations = load_sample_image(image_path)
-    print(f"Original image shape: {image.shape}")
-    print(f"Original annotations: {annotations}")
-    
-    # Apply elastic transform
-    transformed_image, transformed_annotations = apply_elastic_transform(image, annotations, sigma=20, alpha=300)
-    print(f"Transformed annotations: {transformed_annotations}")
-    
-    # Draw circles on original and transformed images
-    original_image_annotated = draw_annotations(image, annotations)
-    transformed_image_annotated = draw_annotations(transformed_image, transformed_annotations)
-    
-    # Display original and transformed images
-    # Save the annotated images instead of displaying them
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
-    original_path = os.path.join(output_dir, "original_image_annotated.png")
-    transformed_path = os.path.join(output_dir, "transformed_image_annotated.png")
-    cv2.imwrite(original_path, cv2.cvtColor(original_image_annotated, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(transformed_path, cv2.cvtColor(transformed_image_annotated, cv2.COLOR_RGB2BGR))
-    print(f"Saved original annotated image to {original_path}")
-    print(f"Saved transformed annotated image to {transformed_path}")
+    parser = argparse.ArgumentParser(description="Show all fingerprint transforms side by side.")
+    parser.add_argument("--image", type=Path, default=None, help="Fingerprint image path")
+    parser.add_argument("--out", type=Path, default=Path("output/all_transforms_side_by_side.jpg"), help="Output preview image path")
+    parser.add_argument("--cols", type=int, default=4, help="Number of grid columns")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--sample-stride", type=int, default=1, help="Subsample annotation rows")
+    parser.add_argument("--no-annotations", action="store_true", help="Disable annotation drawing")
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+
+    image_path = args.image if args.image is not None else pick_default_image()
+    image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError(f"Could not read image: {image_path}")
+
+    annotations = read_annotations(image_path, sample_stride=args.sample_stride)
+    print(f"Image: {image_path}")
+    print(f"Loaded {len(annotations)} annotations")
+
+    tiles = []
+
+    # "baseline" uses unknown transform key -> no-op + standardize to model geometry.
+    base_img, base_ann = apply_single_transform(image, annotations, transformation_type="baseline")
+    if not args.no_annotations and annotations:
+        base_img = draw_annotations(base_img, base_ann)
+    tiles.append(add_tile_label(base_img, "baseline"))
+
+    for transform_name in AUG_TRANSFORMS:
+        try:
+            aug_img, aug_ann = apply_single_transform(image, annotations, transform_name)
+            if not args.no_annotations and annotations:
+                aug_img = draw_annotations(aug_img, aug_ann)
+            tiles.append(add_tile_label(aug_img, transform_name))
+        except Exception as exc:
+            failed = add_tile_label(base_img, f"{transform_name} (err)")
+            cv2.putText(
+                failed,
+                str(exc)[:48],
+                (6, failed.shape[0] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 0, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            tiles.append(failed)
+
+    mosaic = make_grid(tiles, cols=max(1, args.cols))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(args.out), mosaic)
+    if not ok:
+        raise RuntimeError(f"Failed to write output image: {args.out}")
+    print(f"Saved side-by-side preview to: {args.out}")
+    print(f"Transforms shown: baseline + {len(AUG_TRANSFORMS)} augmentations")
+
 
 if __name__ == "__main__":
     main()

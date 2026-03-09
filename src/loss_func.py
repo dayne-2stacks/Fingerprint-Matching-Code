@@ -59,6 +59,74 @@ class PermutationLoss(nn.Module):
         return loss / n_sum
 
 
+class WeightedPermLoss(nn.Module):
+    r"""
+    Class-balanced BCE loss over active permutation cells with per-sample normalization.
+
+    For each sample, positives are weighted by ``neg/pos`` (clamped), and the final sample
+    loss is normalized by active area (``n1*n2``) by default.
+    """
+
+    def __init__(
+        self,
+        pos_weight_min: float = 1.0,
+        pos_weight_max: float = 1000.0,
+        eps: float = 1e-12,
+        normalize_by_active_cells: bool = True,
+    ):
+        super(WeightedPermLoss, self).__init__()
+        self.pos_weight_min = float(pos_weight_min)
+        self.pos_weight_max = float(pos_weight_max)
+        self.eps = float(eps)
+        self.normalize_by_active_cells = bool(normalize_by_active_cells)
+
+    def forward(self, pred_dsmat: Tensor, gt_perm: Tensor, src_ns: Tensor, tgt_ns: Tensor) -> Tensor:
+        batch_num = pred_dsmat.shape[0]
+        pred_dsmat = pred_dsmat.to(dtype=torch.float32)
+        gt_perm = gt_perm.to(dtype=torch.float32)
+
+        try:
+            assert torch.all((pred_dsmat >= 0) * (pred_dsmat <= 1))
+            assert torch.all((gt_perm >= 0) * (gt_perm <= 1))
+        except AssertionError as err:
+            print(pred_dsmat)
+            raise err
+
+        sample_losses = []
+        for b in range(batch_num):
+            n1 = int(src_ns[b].item())
+            n2 = int(tgt_ns[b].item())
+            if n1 <= 0 or n2 <= 0:
+                continue
+
+            x = pred_dsmat[b, :n1, :n2]
+            y = gt_perm[b, :n1, :n2]
+
+            bce = F.binary_cross_entropy(x, y, reduction='none')
+            pos = (y == 1).sum().to(dtype=torch.float32)
+            neg = (y == 0).sum().to(dtype=torch.float32)
+
+            if pos.item() == 0:
+                pos_weight = torch.tensor(10.0, device=pred_dsmat.device, dtype=torch.float32)
+            else:
+                raw = neg / torch.clamp(pos, min=self.eps)
+                pos_weight = torch.clamp(raw, min=self.pos_weight_min, max=self.pos_weight_max)
+
+            weight_map = torch.ones_like(bce)
+            weight_map = torch.where(y == 1, pos_weight, weight_map)
+            sample_sum = torch.sum(weight_map * bce)
+
+            if self.normalize_by_active_cells:
+                denom = max(n1 * n2, 1)
+            else:
+                denom = max(n1, 1)
+            sample_losses.append(sample_sum / float(denom))
+
+        if len(sample_losses) == 0:
+            return torch.tensor(0.0, device=pred_dsmat.device, dtype=torch.float32)
+        return torch.stack(sample_losses).mean()
+
+
 class CrossEntropyLoss(nn.Module):
     r"""
     Multi-class cross entropy loss between two permutations.

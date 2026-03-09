@@ -3,58 +3,99 @@ import torch.nn as nn
 from torchvision import models
 
 
+class _TorchvisionResNetBase(nn.Module):
+    _MODEL_NAME = None
+    _WEIGHTS_ENUM_NAME = None
+    _WEIGHTS_MEMBER = None
+    _FINAL_LAYERS_DEFAULT = False
 
-class ResNet18_base(nn.Module):
-    """
-    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
-      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
-      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
-      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
-    """
-    def __init__(self, final_layers: bool = False):
+    def __init__(self, final_layers=None):
         super().__init__()
+        if final_layers is None:
+            final_layers = self._FINAL_LAYERS_DEFAULT
         self.node_layers, self.edge_layers, self.final_layers = self.get_backbone()
         if not final_layers:
-            self.final_layers = None          # mimic VGG16_base logic
+            self.final_layers = None
         self.backbone_params = list(self.parameters())
 
     def forward(self, *inputs):
-        """
-        Keep the same contract as VGG16_base – subclasses decide how to combine
-        node/edge features for their specific graph-matching head.
-        """
         raise NotImplementedError
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-    # ---------- internal helpers ----------
-    @staticmethod
-    def get_backbone():
-        """
-        Build ResNet-18 backbone split into the three logical chunks.
-        """
-        # torchvision ≥0.15 uses the `weights=` kwarg; fall back if older
+    @classmethod
+    def _build_torchvision_backbone(cls):
+        backbone_ctor = getattr(models, cls._MODEL_NAME)
         try:
-            backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+            weights_enum = getattr(models, cls._WEIGHTS_ENUM_NAME)
+            weights = getattr(weights_enum, cls._WEIGHTS_MEMBER)
+            return backbone_ctor(weights=weights)
         except AttributeError:
-            backbone = models.resnet18(pretrained=True)
+            return backbone_ctor(pretrained=True)
 
-        # --- stride-16 path (conv1-->layer3) ---
+    @classmethod
+    def get_backbone(cls):
+        backbone = cls._build_torchvision_backbone()
         node_layers = nn.Sequential(
             backbone.conv1, backbone.bn1, backbone.relu,
             backbone.maxpool,
             backbone.layer1, backbone.layer2, backbone.layer3
-        )  # output: 256 × H/16 × W/16
-
-        # --- stride-32 path (layer4) ---
-        edge_layers = nn.Sequential(backbone.layer4)  # 512 × H/32 × W/32
-
-        # --- optional global pooling like Rolink et al. (ECCV’20) ---
+        )
+        edge_layers = nn.Sequential(backbone.layer4)
         final_layers = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)))
-
         return node_layers, edge_layers, final_layers
+
+
+class ResNet34_base(_TorchvisionResNetBase):
+    """
+    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
+      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
+      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
+      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+    """
+    _MODEL_NAME = "resnet34"
+    _WEIGHTS_ENUM_NAME = "ResNet34_Weights"
+    _WEIGHTS_MEMBER = "IMAGENET1K_12"
+    _FINAL_LAYERS_DEFAULT = True
+
+    def __init__(self, final_layers: bool = True):
+        super().__init__(final_layers=final_layers)
+
+
+class ResNet50_base(_TorchvisionResNetBase):
+    """
+    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
+      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
+      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
+      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+    """
+    _MODEL_NAME = "resnet50"
+    _WEIGHTS_ENUM_NAME = "ResNet50_Weights"
+    _WEIGHTS_MEMBER = "IMAGENET1K_V2"
+    _FINAL_LAYERS_DEFAULT = True
+
+    def __init__(self, final_layers: bool = True):
+        super().__init__(final_layers=final_layers)
+
+
+
+
+class ResNet18_base(_TorchvisionResNetBase):
+    """
+    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
+      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
+      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
+      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+    """
+    _MODEL_NAME = "resnet18"
+    _WEIGHTS_ENUM_NAME = "ResNet18_Weights"
+    _WEIGHTS_MEMBER = "IMAGENET1K_V1"
+    _FINAL_LAYERS_DEFAULT = False
+
+    def __init__(self, final_layers: bool = False):
+        super().__init__(final_layers=final_layers)
 
 
 # Convenience subclasses to mirror the VGG variants --------------------------

@@ -8,7 +8,7 @@ from torch_sparse import SparseTensor
 
 from src.model.afau import Encoder
 from src.model.affinity_layer import InnerProductWithWeightsAffinity
-from src.model.feature_extractor import ResNet18_final as CNN
+from src.model.feature_extractor import ResNet34_base as CNN
 from src.model.gnn import PYGNNLayer
 from src.model.sinkhorn import Sinkhorn
 from src.model.soft_topk import greedy_perm, soft_topk
@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 # Params
-FEATURE_CHANNEL_NODE = 256  # ResNet18 layer3 channels
-FEATURE_CHANNEL_EDGE = 512  # ResNet18 layer4 channels
+FEATURE_CHANNEL_NODE = 256  # ResNet34 layer3 channels
+FEATURE_CHANNEL_EDGE = 512  # ResNet34 layer4 channels
 NODE_FEATURE_DIM = FEATURE_CHANNEL_NODE + FEATURE_CHANNEL_EDGE  # 768
 GLOBAL_FEATURE_DIM = FEATURE_CHANNEL_EDGE  # 512
 GLOBAL_STATE_DIM = GLOBAL_FEATURE_DIM * 2  # 1024
@@ -37,45 +37,21 @@ GLOBAL_STATE_DIM = GLOBAL_FEATURE_DIM * 2  # 1024
 FIRST_ORDER = True
 POSITIVE_EDGES = True
 GNN_LAYER = 3
-# SK_TAU= 0.005
-SK_TAU = 0.01
-SK_EMB = 1
+SK_TAU= 0.005
+# SK_TAU = 0.01
+SK_EMB = 3
 GNN_FEAT = [16, 16, 16]
-GNN_LAYER = 3
-EDGE_EMB = False
-BATCH_SIZE = 8
+EDGE_EMB = True
+BATCH_SIZE = 4
 
 UNIV_SIZE = 450
-SK_ITER_NUM = 10
+SK_ITER_NUM = 20
 SK_EPSILON = 1e-10
 K_FACTOR = 50.0
 DUSTBIN_LOSS_WEIGHT = 1.0
+RESCALE = (256, 256)
+CROPSIZE = (224, 224)
 
-def _transport_entropy(block):
-    if block.numel() <= 1:
-        return block.new_tensor(0.0)
-    p = block.reshape(-1).clamp(min=1e-12)
-    ent = -(p * torch.log(p)).sum()
-    norm = torch.log(block.new_tensor(float(p.numel())))
-    return ent / norm.clamp(min=1e-12)
-
-
-def _topk_confidence_gap(block):
-    if block.numel() == 0:
-        return block.new_tensor(0.0)
-    n2 = block.shape[1]
-    if n2 == 1:
-        return block[:, 0].mean()
-    top2 = torch.topk(block, k=2, dim=1).values
-    return (top2[:, 0] - top2[:, 1]).mean()
-
-
-def _compute_pred_match_ratio(k_pred_count, min_point_tensor_safe):
-    return torch.where(
-        min_point_tensor_safe > 0,
-        k_pred_count / min_point_tensor_safe,
-        torch.zeros_like(k_pred_count),
-    ).clamp(0.0, 1.0)
 
 
 def _compute_k_match_count(
@@ -89,14 +65,18 @@ def _compute_k_match_count(
 ):
     if training:
         k_match = k_pred_count if bool(train_use_pred_k) else gt_ks
+        # print(k_match)
+        # If a pair is an imposter
         if no_pair_mask is not None:
+            # k_match = torch.clamp(k_match, min=40)
+            # print(k_match)
             k_match = torch.where(no_pair_mask, torch.zeros_like(k_match), k_match)
     else:
+        # If in eval, use prediction count
         k_match = k_pred_count
-        
         k_match = torch.round(k_match)
 
-    k_match = torch.clamp(k_match, min=0.0)
+    # k_match = torch.clamp(k_match, min=0.0)
     k_match = torch.minimum(k_match, min_points)
     return k_match
 
@@ -105,6 +85,7 @@ def _dustbin_supervision_loss(pred, gt, nrows, ncols):
     loss = pred.new_tensor(0.0)
     count = pred.new_tensor(0.0)
     eps = 1e-6
+    # For each prediction in the batch
     for b in range(pred.shape[0]):
         n1 = int(nrows[b].item())
         n2 = int(ncols[b].item())
@@ -121,6 +102,49 @@ def _dustbin_supervision_loss(pred, gt, nrows, ncols):
     if count > 0:
         loss = loss / count
     return loss
+
+
+def _dustbin_soft_k_from_transport(transport_with_dustbin, nrows, ncols):
+    """Estimate a soft match count K from OT dustbin mass.
+
+    Uses the active dustbin row/col indices (n1, n2) for each sample 
+    """
+    batch_size = int(transport_with_dustbin.shape[0])
+    k_vals = []
+    k_rows_vals = []
+    k_cols_vals = []
+    for b in range(batch_size):
+        n1 = int(nrows[b].item())
+        n2 = int(ncols[b].item())
+        max_k = float(min(max(n1, 0), max(n2, 0)))
+        if n1 <= 0 or n2 <= 0:
+            zero = transport_with_dustbin.new_tensor(0.0)
+            k_vals.append(zero)
+            k_rows_vals.append(zero)
+            k_cols_vals.append(zero)
+            continue
+
+        # Active dustbin column sits at index n2 and active dustbin row at n1.
+        row_dustbin_mass = transport_with_dustbin[b, :n1, n2].sum()
+        col_dustbin_mass = transport_with_dustbin[b, n1, :n2].sum()
+
+        n1_t = transport_with_dustbin.new_tensor(float(n1))
+        n2_t = transport_with_dustbin.new_tensor(float(n2))
+        k_hat_rows = n1_t - row_dustbin_mass
+        k_hat_cols = n2_t - col_dustbin_mass
+        k_hat = 0.5 * (k_hat_rows + k_hat_cols)
+        k_hat = torch.clamp(k_hat, min=0.0, max=max_k)
+        k_hat_rows = torch.clamp(k_hat_rows, min=0.0, max=max_k)
+        k_hat_cols = torch.clamp(k_hat_cols, min=0.0, max=max_k)
+
+        k_vals.append(torch.nan_to_num(k_hat, nan=0.0, posinf=max_k, neginf=0.0))
+        k_rows_vals.append(torch.nan_to_num(k_hat_rows, nan=0.0, posinf=max_k, neginf=0.0))
+        k_cols_vals.append(torch.nan_to_num(k_hat_cols, nan=0.0, posinf=max_k, neginf=0.0))
+
+    if not k_vals:
+        empty = transport_with_dustbin.new_zeros((0,), dtype=torch.float32)
+        return empty, empty, empty
+    return torch.stack(k_vals), torch.stack(k_rows_vals), torch.stack(k_cols_vals)
 
 
 # Return as iterable combinations
@@ -205,6 +229,7 @@ class Net(CNN):
         regression: bool = False,
         mean_k: bool = True,
         dustbin_loss_weight: float = 0.5,
+        dustbin_k_mse_weight: float = 1.0,
         dustbin_reject_enable: bool = False,
         dustbin_reject_margin: float = 0.0,
         train_use_pred_k: bool = False,
@@ -258,10 +283,12 @@ class Net(CNN):
                 )
             self.add_module("gnn_layer_{}".format(i), gnn_layer)
 
-        self.rescale = (320, 240)
+        self.rescale = RESCALE
+        self.cropsize = CROPSIZE
         self.univ_size = UNIV_SIZE
         self.k_factor = K_FACTOR
         self.dustbin_loss_weight = float(dustbin_loss_weight)
+        self.dustbin_k_mse_weight = float(dustbin_k_mse_weight)
 
         # Classify fingerprint
         self.classifier = nn.Linear(GNN_FEAT[-1] + SK_EMB, 1)
@@ -308,7 +335,18 @@ class Net(CNN):
         ]
 
     def forward(self, data_dict, regression=True):
-        del regression  # kept for interface compatibility
+        stage_raw = data_dict.get("stage_id", -1)
+        if isinstance(stage_raw, torch.Tensor):
+            stage_id = int(stage_raw.reshape(-1)[0].item()) if stage_raw.numel() > 0 else -1
+        elif isinstance(stage_raw, (list, tuple)):
+            stage_id = int(stage_raw[0]) if len(stage_raw) > 0 else -1
+        else:
+            try:
+                stage_id = int(stage_raw)
+            except (TypeError, ValueError):
+                stage_id = -1
+        stage1_mode = stage_id == 1
+        # if any of the k parameters require gradients, set k_trainable
         k_trainable = any(
             bool(p.requires_grad)
             for p in itertools.chain(
@@ -317,10 +355,13 @@ class Net(CNN):
                 self.final_col.parameters(),
             )
         )
+        # dustbin is trainable, set dustbin trainable
         dustbin_trainable = bool(getattr(self.bin_score, "requires_grad", False))
+        # determine if only k or dustbin is trainable
         only_k = bool(self.training) and k_trainable and (not dustbin_trainable)
         only_dustbin = bool(self.training) and dustbin_trainable and (not k_trainable)
 
+        # Load annotations from dataloader
         images = data_dict["images"]  # Loaded from custom dataset
         points = data_dict["Ps"]  # Pore locations
         n_points = data_dict["ns"]  # number of pores
@@ -334,6 +375,7 @@ class Net(CNN):
             if image.dim() == 3:
                 image = image.unsqueeze(0)
 
+            # Load node, edge and global feature maps 
             node_maps = self.node_layers(image)
 
             edge_maps = self.edge_layers(node_maps)
@@ -343,12 +385,14 @@ class Net(CNN):
 
             node_maps = normalize_over_channels(node_maps)
             edge_maps = normalize_over_channels(edge_maps)
-
-            node_desc = concat_features(feature_align(node_maps, point, num_p, self.rescale), num_p)
-            edge_desc = concat_features(feature_align(edge_maps, point, num_p, self.rescale), num_p)
+            
+            # interpolate with points
+            node_desc = concat_features(feature_align(node_maps, point, num_p, self.cropsize), num_p)
+            edge_desc = concat_features(feature_align(edge_maps, point, num_p, self.cropsize), num_p)
 
             node_features = torch.cat((node_desc, edge_desc), dim=1)
-
+            
+            # Add positional embedding
             pos = normalize_keypoints(point, image.shape)
             pos_emb = self.pos_mlp(pos).permute(0, 2, 1)
             pos_emb = concat_features(pos_emb, num_p)
@@ -379,76 +423,62 @@ class Net(CNN):
         quadratic_affs_list = [[0.5 * x for x in quadratic_affs] for quadratic_affs in quadratic_affs_list]
 
         pair_indices = list(lexico_iter(range(num_graphs)))
-        if len(pair_indices) != 1:
-            raise ValueError(
-                f"Net.forward currently supports 2GM pairs only. Expected 1 pair, got {len(pair_indices)}"
-            )
 
-        idx1, idx2 = pair_indices[0]
-        unary_affs = unary_affs_list[0]
-        quadratic_affs = quadratic_affs_list[0]
+        for unary_affs, quadratic_affs, (idx1, idx2) in zip(unary_affs_list, quadratic_affs_list, lexico_iter(range(num_graphs))):
+            Kp = torch.stack(pad_tensor(unary_affs), dim=0)
 
-        if "KGHs_sparse" not in data_dict:
-            raise KeyError("data_dict is missing required key 'KGHs_sparse'")
-        Kp = torch.stack(pad_tensor(unary_affs), dim=0)
-        if Kp.ndim != 3:
-            raise ValueError(f"Expected Kp to be 3D, got shape {tuple(Kp.shape)}")
-        if FIRST_ORDER:
-            emb = Kp.transpose(1, 2).contiguous().view(Kp.shape[0], -1, 1)
-        else:
-            emb = torch.ones(Kp.shape[0], Kp.shape[1] * Kp.shape[2], 1, device=Kp.device)
-        kgh_sparse = data_dict["KGHs_sparse"]
-        if num_graphs == 2 and len(kgh_sparse) != Kp.shape[0]:
-            raise ValueError(f"KGHs_sparse batch mismatch: expected {Kp.shape[0]}, got {len(kgh_sparse)}")
-        qap_emb = []
-        sparse_size = Kp.shape[1] * Kp.shape[2]
-        for b in range(Kp.shape[0]):
-            if num_graphs == 2:
-                kro_G, kro_H = kgh_sparse[b]
+            if FIRST_ORDER:
+                emb = Kp.transpose(1, 2).contiguous().view(Kp.shape[0], -1, 1)
             else:
-                key = "{},{}".format(idx1, idx2)
-                if key not in kgh_sparse:
-                    raise KeyError(f"Missing sparse KGH entry for pair key '{key}'")
-                kro_G, kro_H = kgh_sparse[key]
-            K_value, row_idx, col_idx = construct_sparse_aff_mat(
-                quadratic_affs[b], unary_affs[b], kro_G, kro_H
-            )
-            common_len = min(row_idx.numel(), col_idx.numel(), K_value.numel())
-            row = row_idx[:common_len].long()
-            col = col_idx[:common_len].long()
-            val = K_value[:common_len]
-            adj = SparseTensor(
-                row=row,
-                col=col,
-                value=val,
-                sparse_sizes=(sparse_size, sparse_size),
-            )
-            tmp_emb = emb[b].unsqueeze(0)
-            for i in range(self.gnn_layer):
-                gnn_layer = getattr(self, "gnn_layer_{}".format(i))
-                tmp_emb = gnn_layer(adj, tmp_emb, n_points[idx1], n_points[idx2], b)
-            qap_emb.append(tmp_emb.squeeze(0))
-        if len(qap_emb) != Kp.shape[0]:
-            raise RuntimeError(f"Unexpected qap_emb length {len(qap_emb)} (expected {Kp.shape[0]})")
-        matcher_emb = torch.stack(pad_tensor(qap_emb), dim=0)
-        logits = self.classifier(matcher_emb)
-        match_scores = logits.view(logits.shape[0], Kp.shape[2], Kp.shape[1]).transpose(1, 2)
-        max_n1, max_n2 = Kp.shape[1], Kp.shape[2]
+                emb = torch.ones(Kp.shape[0], Kp.shape[1] * Kp.shape[2], 1, device=Kp.device)
+            kgh_sparse = data_dict["KGHs_sparse"]
+
+            qap_emb = []
+            sparse_size = Kp.shape[1] * Kp.shape[2]
+            for b in range(Kp.shape[0]):
+                if num_graphs == 2:
+                    kro_G, kro_H = kgh_sparse[b]
+                else:
+                    key = "{},{}".format(idx1, idx2)
+                    kro_G, kro_H = kgh_sparse[key]
+                K_value, row_idx, col_idx = construct_sparse_aff_mat(
+                    quadratic_affs[b], unary_affs[b], kro_G, kro_H
+                )
+                common_len = min(row_idx.numel(), col_idx.numel(), K_value.numel())
+                row = row_idx[:common_len].long()
+                col = col_idx[:common_len].long()
+                val = K_value[:common_len]
+                adj = SparseTensor(
+                    row=row,
+                    col=col,
+                    value=val,
+                    sparse_sizes=(sparse_size, sparse_size),
+                )
+                tmp_emb = emb[b].unsqueeze(0)
+                for i in range(self.gnn_layer):
+                    gnn_layer = getattr(self, "gnn_layer_{}".format(i))
+                    tmp_emb = gnn_layer(adj, tmp_emb, n_points[idx1], n_points[idx2], b)
+                qap_emb.append(tmp_emb.squeeze(0))
+
+            matcher_emb = torch.stack(pad_tensor(qap_emb), dim=0)
+            logits = self.classifier(matcher_emb)
+            match_scores = logits.view(logits.shape[0], Kp.shape[2], Kp.shape[1]).transpose(1, 2)
+
 
         # Doubly stochastic matrix for K head (AFAU path)
         ss_base = self.sinkhorn(match_scores, n_points[idx1], n_points[idx2], dummy_row=True)
+        ds_mat_matcher = torch.nan_to_num(ss_base, nan=0.0, posinf=0.0, neginf=0.0)
 
-        if match_scores.ndim != 3:
-            raise ValueError(f"Expected scores to be 3D (B,N,M), got {tuple(match_scores.shape)}")
         batch_size, max_n1_transport, max_n2_transport = match_scores.shape
         nrows = n_points[idx1].to(match_scores.device).view(-1)
         ncols = n_points[idx2].to(match_scores.device).view(-1)
-        if nrows.numel() != batch_size or ncols.numel() != batch_size:
-            raise ValueError(
-                "n_points batch size mismatch: "
-                f"scores={batch_size}, nrows={nrows.numel()}, ncols={ncols.numel()}"
-            )
+
         min_point_tensor = torch.minimum(nrows, ncols).to(dtype=torch.float32)
+        # if self.training and data_dicKpt.get("label") is not None:
+        #     labels = data_dict["label"].to(match_scores.device).view(-1).long()
+        #     imposter_mask = labels == 0
+        #     if imposter_mask.any():
+        #         min_point_tensor = torch.where(imposter_mask, torch.zeros_like(min_point_tensor), min_point_tensor)
         min_point_tensor_safe = torch.clamp(min_point_tensor, min=1.0)
         gt_perm_mat = data_dict.get("gt_perm_mat")
         if gt_perm_mat is None:
@@ -532,28 +562,38 @@ class Net(CNN):
                 k_logits = (k_row_logit + k_col_logit) / 2
             else:
                 k_logits = k_row_logit
-            ks = torch.relu(k_logits)/ (1+torch.relu(k_logits))
+            ks = torch.sigmoid(k_logits)
+            # ks = torch.relu(k_logits)
         else:
-            k_logits = torch.zeros_like(min_point_tensor)
-            ks = torch.zeros_like(min_point_tensor)
+            ks = gt_ks / min_point_tensor
+            # ks = gt_ks
 
-        k_pred_count = torch.nan_to_num(
+        # ----- K Match Count Selection -----
+        predicted_match_count = torch.nan_to_num(
             ks.view(-1) * min_point_tensor,
+            # ks.view(-1),
             nan=0.0,
             posinf=0.0,
             neginf=0.0,
         )
-        k_match = _compute_k_match_count(
-            k_pred_count,
+
+        selected_match_count = _compute_k_match_count(
+            predicted_match_count,
             gt_ks,
             min_point_tensor,
             training=bool(self.training),
             train_use_pred_k=bool(self.train_use_pred_k),
             no_pair_mask=no_pair_mask if self.training else None,
         )
+        if stage1_mode:
+            # Stage 1 forces GT-k as the selected match count.
+            selected_match_count = torch.clamp(gt_ks, min=0.0)
+            selected_match_count = torch.minimum(selected_match_count, min_point_tensor)
 
-        full_transport = match_scores.new_zeros(batch_size, max_n1_transport + 1, max_n2_transport + 1)
-        real_transport = match_scores.new_zeros(batch_size, max_n1_transport, max_n2_transport)
+        # ----- Transport Matrices (Dustbin + Real Block) -----
+        # transport_with_dustbin keeps the extra row/col; transport_real_block excludes them.
+        transport_with_dustbin = match_scores.new_zeros(batch_size, max_n1_transport + 1, max_n2_transport + 1)
+        transport_real_block = match_scores.new_zeros(batch_size, max_n1_transport, max_n2_transport)
         for b in range(batch_size):
             n1 = int(nrows[b].item())
             n2 = int(ncols[b].item())
@@ -566,89 +606,130 @@ class Net(CNN):
                 )
             if n1 == 0 and n2 == 0:
                 continue
-            logits_transport = match_scores[b, :n1, :n2]
-            log_transport = log_optimal_transport(logits_transport / self.tau, self.bin_score, SK_ITER_NUM)
-            transport = torch.exp(log_transport)
-            transport = torch.nan_to_num(transport, nan=0.0, posinf=0.0, neginf=0.0)
-            full_transport[b, : n1 + 1, : n2 + 1] = transport
+            sample_logits_real_block = match_scores.detach()[b, :n1, :n2]
+            log_transport = log_optimal_transport(sample_logits_real_block / self.tau, self.bin_score, SK_ITER_NUM)
+            sample_transport_with_dustbin = torch.exp(log_transport)
+            sample_transport_with_dustbin = torch.nan_to_num(
+                sample_transport_with_dustbin,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            transport_with_dustbin[b, : n1 + 1, : n2 + 1] = sample_transport_with_dustbin
             if n1 > 0 and n2 > 0:
-                real_transport[b, :n1, :n2] = transport[:n1, :n2]
+                transport_real_block[b, :n1, :n2] = sample_transport_with_dustbin[:n1, :n2]
+                dustbin_col = transport_with_dustbin[b, :n1, -1]   # (n1,)
+                dustbin_row = transport_with_dustbin[b, -1, :n2]   # (n2,)
 
-        
-        if bool(self.regression) and (not only_dustbin):
-            match_count_for_topk = k_match.view(-1)
-            _, topk_prob = soft_topk(
-                real_transport,
-                match_count_for_topk,
+                mask = (
+                    transport_with_dustbin[b, :n1, :n2] < dustbin_col[:, None]
+                ) & (
+                    transport_with_dustbin[b, :n1, :n2] < dustbin_row[None, :]
+                )
+                transport_real_block[b, :n1, :n2][mask] = 0.0
+
+        dustbin_k_pred_count, dustbin_k_rows_count, dustbin_k_cols_count = _dustbin_soft_k_from_transport(
+            transport_with_dustbin,
+            nrows,
+            ncols,
+        )
+        if dustbin_k_pred_count.numel() > 0:
+            dustbin_k_balance_err = torch.mean(torch.abs(dustbin_k_rows_count - dustbin_k_cols_count))
+        else:
+            dustbin_k_balance_err = match_scores.new_tensor(0.0)
+
+        # ----- Top-k Refinement Path -----
+        if (bool(self.regression) and (not only_dustbin)) or stage1_mode:
+            topk_match_count = selected_match_count.view(-1)
+            _, topk_selection_prob = soft_topk(
+                ss_base,
+                topk_match_count,
                 SK_ITER_NUM,
                 self.tau,
                 n_points[idx1],
                 n_points[idx2],
                 return_prob=True,
             )
-            refined_real = topk_prob * real_transport
-            refined_real = torch.nan_to_num(refined_real, nan=0.0, posinf=0.0, neginf=0.0)
+            topk_refined_transport = topk_selection_prob 
+            topk_refined_transport = torch.nan_to_num(topk_refined_transport, nan=0.0, posinf=0.0, neginf=0.0)
         else:
-            refined_real = real_transport.clone()
-            refined_real = torch.nan_to_num(refined_real, nan=0.0, posinf=0.0, neginf=0.0)
+            topk_refined_transport = transport_real_block.clone()
+            topk_refined_transport = torch.nan_to_num(topk_refined_transport, nan=0.0, posinf=0.0, neginf=0.0)
 
-        ds_mat_real = real_transport if only_dustbin else refined_real
-        ds_mat = full_transport.clone()
-        ds_mat[:, : real_transport.shape[1], : real_transport.shape[2]] = ds_mat_real
 
-        match_count_for_perm_topk = k_match if bool(self.regression) else min_point_tensor
-        x = hungarian(refined_real, n_points[idx1], n_points[idx2])
+
+        # ----- DS Matrix Assembly -----  
+        ds_mat = transport_with_dustbin.clone()
+        ds_mat[:, : topk_refined_transport.shape[1], : topk_refined_transport.shape[2]] = topk_refined_transport
+
+        # ----- Top-k Permutation Proposal -----
+        perm_topk_match_count = selected_match_count
+        hungarian_seed_perm = hungarian(topk_refined_transport, n_points[idx1], n_points[idx2])
         top_indices = torch.argsort(
-            x.mul(refined_real).reshape(x.shape[0], -1),
+            hungarian_seed_perm.mul(topk_refined_transport).reshape(hungarian_seed_perm.shape[0], -1),
             descending=True,
             dim=-1,
         )
-        perm_mat_topk = torch.zeros_like(refined_real)
-        perm_mat_topk = greedy_perm(perm_mat_topk, top_indices, match_count_for_perm_topk)
+        topk_permutation = torch.zeros_like(topk_refined_transport)
+        topk_permutation = greedy_perm(topk_permutation, top_indices, perm_topk_match_count)
 
-        perm_mat_dustbin = torch.zeros_like(real_transport)
+        
+        # if not self.training:
+        #     mask = ss_base < 0.3
+        #     topk_permutation[mask] = 0
+
+        # ----- Dustbin Rejection/Gating Proposal -----
+        dustbin_gated_permutation = torch.zeros_like(transport_real_block)
         reject_rows = []
         reject_cols = []
         dustbin_reject_enable = bool(getattr(self, "dustbin_reject_enable", False))
-        margin = full_transport.new_tensor(float(getattr(self, "dustbin_reject_margin", 0.0)))
-        for b in range(real_transport.shape[0]):
+        margin = transport_with_dustbin.new_tensor(float(getattr(self, "dustbin_reject_margin", 0.0)))
+        for b in range(transport_real_block.shape[0]):
             n1 = int(n_points[idx1][b].item())
             n2 = int(n_points[idx2][b].item())
-            row_reject = full_transport.new_zeros((n1,), dtype=torch.bool)
-            col_reject = full_transport.new_zeros((n2,), dtype=torch.bool)
+            reject_row_mask = transport_with_dustbin.new_zeros((n1,), dtype=torch.bool)
+            reject_col_mask = transport_with_dustbin.new_zeros((n2,), dtype=torch.bool)
 
             if dustbin_reject_enable and n1 > 0 and n2 > 0:
-                p_full = full_transport[b]
-                p_real = real_transport[b, :n1, :n2]
-                row_best = p_real.max(dim=1).values
-                col_best = p_real.max(dim=0).values
-                dust_row = p_full[:n1, n2]
-                dust_col = p_full[n1, :n2]
-                row_reject = dust_row >= (row_best + margin)
-                col_reject = dust_col >= (col_best + margin)
+                sample_transport_full = transport_with_dustbin[b]
+                sample_transport_real = transport_real_block[b, :n1, :n2]
+                row_best_real_prob = sample_transport_real.max(dim=1).values
+                col_best_real_prob = sample_transport_real.max(dim=0).values
+                row_dustbin_prob = sample_transport_full[:n1, n2]
+                col_dustbin_prob = sample_transport_full[n1, :n2]
+                reject_row_mask = row_dustbin_prob >= (row_best_real_prob + margin)
+                reject_col_mask = col_dustbin_prob >= (col_best_real_prob + margin)
 
-            keep_rows = (~row_reject).nonzero(as_tuple=False).view(-1)
-            keep_cols = (~col_reject).nonzero(as_tuple=False).view(-1)
-            if n1 > 0 and n2 > 0 and keep_rows.numel() > 0 and keep_cols.numel() > 0:
-                sub = real_transport[b, :n1, :n2].index_select(0, keep_rows).index_select(1, keep_cols)
-                sub_perm = hungarian(sub)
-                nz = sub_perm.nonzero(as_tuple=False)
+            kept_row_indices = (~reject_row_mask).nonzero(as_tuple=False).view(-1)
+            kept_col_indices = (~reject_col_mask).nonzero(as_tuple=False).view(-1)
+            if n1 > 0 and n2 > 0 and kept_row_indices.numel() > 0 and kept_col_indices.numel() > 0:
+                kept_submatrix = transport_real_block[b, :n1, :n2].index_select(0, kept_row_indices).index_select(
+                    1, kept_col_indices
+                )
+                kept_submatrix_perm = hungarian(kept_submatrix)
+                nz = kept_submatrix_perm.nonzero(as_tuple=False)
                 if nz.numel() > 0:
-                    rr = keep_rows[nz[:, 0]]
-                    cc = keep_cols[nz[:, 1]]
-                    perm_mat_dustbin[b, rr, cc] = 1.0
+                    rr = kept_row_indices[nz[:, 0]]
+                    cc = kept_col_indices[nz[:, 1]]
+                    dustbin_gated_permutation[b, rr, cc] = 1.0
 
-            reject_rows.append(row_reject)
-            reject_cols.append(col_reject)
+            reject_rows.append(reject_row_mask)
+            reject_cols.append(reject_col_mask)
 
+        # ----- Stage/Mode Overrides and Final Composition -----
+        if stage1_mode:
+            # Stage 1 uses top-k-only permutation output by neutralizing dustbin gating.
+            dustbin_gated_permutation = torch.ones_like(topk_permutation)
+            reject_rows = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx1]]
+            reject_cols = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx2]]
         if only_k:
-            perm_mat_dustbin = torch.ones_like(perm_mat_topk)
-            reject_rows = [full_transport.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx1]]
-            reject_cols = [full_transport.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx2]]
+            dustbin_gated_permutation = torch.ones_like(topk_permutation)
+            reject_rows = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx1]]
+            reject_cols = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx2]]
         if only_dustbin:
-            perm_mat_topk = torch.ones_like(perm_mat_dustbin)
+            topk_permutation = torch.ones_like(dustbin_gated_permutation)
 
-        perm_mat = perm_mat_topk * perm_mat_dustbin
+        perm_mat = topk_permutation * dustbin_gated_permutation
 
         supervised_ks = torch.where(
             min_point_tensor > 0,
@@ -658,80 +739,60 @@ class Net(CNN):
         if no_pair_mask is not None:
             supervised_ks = torch.where(no_pair_mask, torch.zeros_like(supervised_ks), supervised_ks)
 
-        # Authentication features/logits must stay prediction-driven only.
-        pred_match_ratio = _compute_pred_match_ratio(k_pred_count, min_point_tensor_safe)
-        dustbin_mass_row = []
-        dustbin_mass_col = []
-        transport_entropy = []
-        topk_conf_gap = []
-        for b in range(full_transport.shape[0]):
-            n1 = int(nrows[b].item())
-            n2 = int(ncols[b].item())
-            p_full = full_transport[b]
-            p_real = real_transport[b, :n1, :n2] if (n1 > 0 and n2 > 0) else real_transport.new_zeros((0, 0))
-            if n1 > 0:
-                dustbin_mass_row.append(p_full[:n1, n2].mean())
-            else:
-                dustbin_mass_row.append(p_full.new_tensor(0.0))
-            if n2 > 0:
-                dustbin_mass_col.append(p_full[n1, :n2].mean())
-            else:
-                dustbin_mass_col.append(p_full.new_tensor(0.0))
-            if n1 > 0 and n2 > 0:
-                transport_entropy.append(_transport_entropy(p_real))
-                topk_conf_gap.append(_topk_confidence_gap(p_real))
-            else:
-                zero = p_full.new_tensor(0.0)
-                transport_entropy.append(zero)
-                topk_conf_gap.append(zero)
-        dustbin_mass_row = torch.stack(dustbin_mass_row, dim=0).to(pred_match_ratio.dtype)
-        dustbin_mass_col = torch.stack(dustbin_mass_col, dim=0).to(pred_match_ratio.dtype)
-        transport_entropy = torch.stack(transport_entropy, dim=0).to(pred_match_ratio.dtype)
-        topk_conf_gap = torch.stack(topk_conf_gap, dim=0).to(pred_match_ratio.dtype)
-
-        zero = ks.new_tensor(0.0)
+    
+        
         if bool(self.regression) and k_trainable:
             ks_loss = F.mse_loss(ks, supervised_ks) * self.k_factor
+            # ks_loss = F.mse_loss(ks, gt_ks) * self.k_factor
             ks_error = F.l1_loss(ks * min_point_tensor, gt_ks)
+            # ks_error = F.l1_loss(ks, gt_ks)
+            ks_loss = ks_loss + 0.0001 * ks_error
         else:
-            ks_loss = zero
-            ks_error = zero
+            ks_loss = ks.new_tensor(0.0)
+            ks_error = ks.new_tensor(0.0)
 
         if dustbin_trainable and data_dict.get("gt_perm_mat") is not None:
-            dustbin_loss = _dustbin_supervision_loss(
-                ds_mat,
+            dustbin_k_mse_loss = F.mse_loss(dustbin_k_pred_count, gt_ks)
+            dustbin_k_mae = F.l1_loss(dustbin_k_pred_count, gt_ks)
+            dustbin_bce_loss = _dustbin_supervision_loss(
+                transport_with_dustbin,
                 data_dict["gt_perm_mat"],
                 n_points[idx1],
                 n_points[idx2],
             )
-            dustbin_loss = dustbin_loss * self.dustbin_loss_weight
+            dustbin_loss = (
+                (self.dustbin_k_mse_weight * dustbin_k_mse_loss)
+                + (self.dustbin_loss_weight * dustbin_bce_loss)
+            )
         else:
-            dustbin_loss = zero
+            dustbin_k_mse_loss = ks.new_tensor(0.0)
+            dustbin_k_mae = ks.new_tensor(0.0)
+            dustbin_bce_loss = ks.new_tensor(0.0)
+            dustbin_loss = ks.new_tensor(0.0)
 
-        dustbin_margin_loss = ds_mat.new_tensor(0.0)
+        # print(ks_error * 0.0001)
 
         data_dict.update(
-            {
+            {   
+                "ds_mat_topk": topk_refined_transport,
+                "ds_mat_dustbin": transport_real_block,
+                "ds_mat_matcher": ds_mat_matcher,
                 "ds_mat": ds_mat,
                 "perm_mat": perm_mat,
-                "perm_mat_topk": perm_mat_topk,
-                "perm_mat_dustbin": perm_mat_dustbin,
+                "perm_mat_topk": topk_permutation,
+                "perm_mat_dustbin": dustbin_gated_permutation,
                 "ks_loss": ks_loss,
                 "ks_error": ks_error,
                 "dustbin_loss": dustbin_loss,
+                "dustbin_k_mse_loss": dustbin_k_mse_loss,
+                "dustbin_k_mae": dustbin_k_mae,
+                "dustbin_bce_loss": dustbin_bce_loss,
+                "dustbin_k_balance_err": dustbin_k_balance_err,
                 "gt_ks": gt_ks,
-                "k_pred_ratio": pred_match_ratio,
-                "k_pred_count": k_pred_count,
-                "k_match_count": k_match,
+                "k_pred_count": predicted_match_count,
+                "k_match_count": selected_match_count,
                 "k_prob": ks,
-                "k_logit": k_logits if k_logits is not None else torch.zeros_like(min_point_tensor),
-                "dustbin_margin_loss": dustbin_margin_loss,
-                "dustbin_margin_value": ds_mat.new_tensor(float(self.dustbin_reject_margin)),
-                "dustbin_margin_loss_weight": 0.0,
-                "transport_entropy": transport_entropy,
-                "dustbin_mass_row": dustbin_mass_row,
-                "dustbin_mass_col": dustbin_mass_col,
-                "topk_conf_gap": topk_conf_gap,
+                "dustbin_k_pred_count": dustbin_k_pred_count,
                 "rejected_rows": reject_rows,
                 "rejected_cols": reject_cols,
                 "ns": [n_points[idx1] + 1, n_points[idx2] + 1],

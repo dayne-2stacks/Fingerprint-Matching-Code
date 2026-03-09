@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import logging
-import sys
 from typing import List, Tuple
 
 import numpy as np
@@ -25,85 +24,17 @@ from sklearn.metrics import (
 )
 import torch
 
-from src.benchmark import (
-    L3SFV2AugmentedBenchmark,
-    PolyUDBIIBenchmark,
-    PolyUDBIBenchmark,
-    L3SFBenchmark,
-)
 from src.gmdataset import GMDataset, get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
+from utils.eval_cli_common import (
+    DATASET_CHOICES,
+    build_classify_dataset,
+    default_data_root,
+    setup_logging,
+)
 from utils.models_sl import load_model
-from src.model.dustbin import strip_dustbin_by_ns
-
-
-def _setup_logging() -> logging.Logger:
-    handlers = [logging.StreamHandler(stream=sys.stdout)]
-    try:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=handlers,
-            force=True,
-        )
-    except (TypeError, ValueError):
-        # Python < 3.8 doesn't support force=
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=handlers,
-        )
-    return logging.getLogger(__name__)
-
-
-def _build_dataset(dataset_name: str, data_root: str) -> GMDataset:
-    """
-    Build a dataset to perform pair classification on.
-    """
-    if dataset_name == "PolyU-DBII":
-        benchmark = PolyUDBIIBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-        )
-    elif dataset_name == "PolyU-DBI":
-        benchmark = PolyUDBIBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-        )
-    elif dataset_name == "L3-SF":
-        benchmark = L3SFBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-        )
-    else:
-        dataset_name = "L3SFV2Augmented"
-        benchmark = L3SFV2AugmentedBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-            name=dataset_name,
-        )
-
-    dataset = GMDataset(dataset_name, benchmark, None, True, None, "2GM", augment=False)
-    return dataset
-
-
-def _default_data_root(dataset_name: str) -> str:
-    if dataset_name == "PolyU-DBII":
-        return "dataset/PolyU/DBII"
-    if dataset_name == "PolyU-DBI":
-        return "dataset/PolyU/DBI"
-    if dataset_name == "L3-SF":
-        return "dataset/L3-SF"
-    return "dataset/Synthetic"
+from src.model.dustbin import strip_dustbin_from_outputs
 
 
 def _collect_pairs(
@@ -165,15 +96,7 @@ def _collect_pairs(
                     denom = max(n1 + n2, 1)
                     dustbin_rates.append(float(dustbin_unmatched.item()) / float(denom))
                 # strip the dustbin row/col from the perm matrix and update ns to reflect the new size
-                n1 = ns[0]
-                n2 = ns[1]
-                outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
-                outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
-                # strip gt_perm_mat if it exists (it may not exist if the dataset doesn't provide gt matches)
-                if "gt_perm_mat" in outputs:
-                    outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
-                # update ns to reflect the new size after stripping dustbin
-                outputs["ns"] = [n - 1 for n in outputs["ns"]]
+                strip_dustbin_from_outputs(outputs)
 
             # detach the permutation matrix why do we 
             perm_mat = outputs["perm_mat"].detach()
@@ -226,7 +149,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Classify fingerprint pairs using k_ratio and dustbin rate.")
     parser.add_argument(
         "--dataset",
-        choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI", "L3-SF"],
+        choices=DATASET_CHOICES,
         default="L3SFV2Augmented",
         help="Dataset to evaluate on",
     )
@@ -271,12 +194,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger = _setup_logging()
+    logger = setup_logging()
 
-    data_root = args.data_root or _default_data_root(args.dataset)
+    data_root = args.data_root or default_data_root(args.dataset)
     logger.info("Dataset=%s data_root=%s", args.dataset, data_root)
 
-    dataset = _build_dataset(args.dataset, data_root)
+    dataset = build_classify_dataset(args.dataset, data_root)
 
     model = Net(regression=True)
     model.dustbin_reject_enable = True

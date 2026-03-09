@@ -1,10 +1,11 @@
 train:
   num_iterations: 25
-  patience: 8
+  patience: 15
   LR: 8.e-5
-  K_LR: 3.e-4
+  K_LR: 1.e-3
   BACKBONE_LR: 2.e-5
   OUTPUT_PATH: results5/topk/stage2
+  PRETRAINED_PATH: results5/shared_matcher/stage1/params/best_model.pt
 ngm:
   REGRESSION: true
   DUSTBIN_REJECT_ENABLE: false

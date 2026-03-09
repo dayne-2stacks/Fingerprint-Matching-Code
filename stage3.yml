@@ -1,6 +1,6 @@
 train:
   num_iterations: 25
-  patience: 8
+  patience: 15
   LR: 5.e-5
   K_LR: 2.e-4
   BACKBONE_LR: 1.e-5

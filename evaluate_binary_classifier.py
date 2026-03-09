@@ -2,7 +2,6 @@ from pathlib import Path
 import argparse
 import json
 import logging
-import sys
 from typing import Optional
 import numpy as np
 import pandas as pd
@@ -14,135 +13,41 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     f1_score,
-    roc_curve,
-    auc,
-    precision_recall_curve,
     confusion_matrix,
 )
 import torch
 from utils.matching import build_matches
 
-from src.benchmark import L3SFV2AugmentedBenchmark, PolyUDBIIBenchmark, PolyUDBIBenchmark, L3SFBenchmark
-from src.gmdataset import GMDataset, get_dataloader
+from src.gmdataset import get_dataloader
 from src.model.ngm import Net
 from utils.data_to_cuda import data_to_cuda
+from utils.eval_cli_common import (
+    DATASET_CHOICES,
+    build_classify_dataset,
+    compute_curve_stats,
+    default_data_root,
+    setup_logging,
+)
 from utils.models_sl import load_model
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
-from src.model.dustbin import strip_dustbin_by_ns
-
-
-def _setup_logging(log_path: Path) -> logging.Logger:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    handlers = [
-        logging.StreamHandler(stream=sys.stdout),
-        logging.FileHandler(str(log_path)),
-    ]
-    try:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=handlers,
-            force=True,
-        )
-    except (TypeError, ValueError):
-        # Python < 3.8 doesn't support force=
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=handlers,
-        )
-    return logging.getLogger(__name__)
-
-
-
-def _compute_curve_stats(labels: np.ndarray, probs: np.ndarray, logger: logging.Logger):
-    unique_labels = np.unique(labels)
-    if unique_labels.size < 2:
-        logger.warning("Only one class present in labels; ROC/PR/EER metrics are undefined.")
-        return {
-            "fpr": None,
-            "tpr": None,
-            "roc_auc": float("nan"),
-            "prec_curve": None,
-            "rec_curve": None,
-            "pr_auc": float("nan"),
-            "eer_threshold": None,
-            "eer": float("nan"),
-        }
-
-    fpr, tpr, thresholds = roc_curve(labels, probs)
-    fnr = 1 - tpr
-    eer_idx = int(np.nanargmin(np.abs(fnr - fpr)))
-    eer_threshold = float(thresholds[eer_idx])
-    eer = float((fpr[eer_idx] + fnr[eer_idx]) * 0.5)
-
-    roc_auc = float(auc(fpr, tpr))
-    prec_curve, rec_curve, _ = precision_recall_curve(labels, probs)
-    pr_auc = float(auc(rec_curve, prec_curve))
-
-    return {
-        "fpr": fpr,
-        "tpr": tpr,
-        "roc_auc": roc_auc,
-        "prec_curve": prec_curve,
-        "rec_curve": rec_curve,
-        "pr_auc": pr_auc,
-        "eer_threshold": eer_threshold,
-        "eer": eer,
-    }
+from src.model.dustbin import ns_pair_to_ints, strip_dustbin_from_outputs
 
 
 def evaluate(dataset_name: str, data_root: str, filter=None):
     """Run evaluation using the best classifier model for the chosen dataset.
     """
     dataset_len = None
-
-    if dataset_name == "PolyU-DBII":
-        benchmark = PolyUDBIIBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-            filter=filter,
-        )
-    elif dataset_name == "PolyU-DBI":
-        benchmark = PolyUDBIBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-            filter=filter,
-        )
-    elif dataset_name == "L3-SF":
-        benchmark = L3SFBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-            filter=filter,
-        )
-        
-    else:
-        dataset_name = "L3SFV2Augmented"
-        benchmark = L3SFV2AugmentedBenchmark(
-            sets="test",
-            obj_resize=(320, 240),
-            train_root=data_root,
-            task="classify",
-            name =dataset_name,
-            filter=filter,
-        )
     
     # Path to model
     main_dir = "results3/dustbin/stage5"
     # Output directory for evaluation results
     out_dir = Path(f"{main_dir}/{dataset_name}")
 
-    logger = _setup_logging(out_dir / "eval.log")
+    logger = setup_logging(out_dir / "eval.log")
     logger.info("Starting evaluation: dataset=%s data_root=%s", dataset_name, data_root)
 
     # Create dataset and dataloader
-    dataset = GMDataset(dataset_name, benchmark, dataset_len, True, None, "2GM", augment=False)
+    dataset = build_classify_dataset(dataset_name, data_root, filter=filter, length=dataset_len, augment=False)
     dataloader = get_dataloader(dataset, batch_size=8, shuffle=False, fix_seed=True)
 
     # Load the trained model
@@ -179,21 +84,9 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
             # Force dustbin handling to mirror classify_pairs behavior when checkpoints
             # don't set the flag reliably.
             outputs["has_dustbin"] = True
-            has_dustbin = outputs.get("has_dustbin", False)
-            # If there is a dustbin reduce number on points
-            if has_dustbin:
-                n1 = outputs["ns"][0] - 1
-                n2 = outputs["ns"][1] - 1
-            else:
-                n1 = outputs["ns"][0]
-                n2 = outputs["ns"][1]
-            
-            # Strip dustbin from matrices to mirror classify_pairs post-processing, which is important for consistent k_pred and k_score calculation.
-            outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
-            outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
-            if "gt_perm_mat" in outputs:
-                outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
-            outputs["ns"] = [n1, n2]
+            # Strip dustbin from matrices to mirror classify_pairs post-processing, which is important for consistent
+            # k_pred and k_score calculation.
+            strip_dustbin_from_outputs(outputs)
             # get k_pred and k_score for this batch
             perm_mat = outputs["perm_mat"].detach()
             k_pred = perm_mat.sum(dim=(1, 2)).float()
@@ -233,7 +126,7 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
             logger.info("Batch %d: labels=%s", i, labels)
                 
 
-    curve_stats = _compute_curve_stats(all_labels, all_probs, logger)
+    curve_stats = compute_curve_stats(all_labels, all_probs, logger)
     fpr = curve_stats["fpr"]
     tpr = curve_stats["tpr"]
     roc_auc = curve_stats["roc_auc"]
@@ -269,25 +162,14 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
                     with torch.no_grad():
                         outputs = match_net(batch)
                     # Mirror debug_final_match post-processing for dustbin handling.
-                    has_dustbin = outputs.get("has_dustbin", False)
-                    n1 = outputs["ns"][0][0] if isinstance(outputs["ns"][0], torch.Tensor) else outputs["ns"][0]
-                    n2 = outputs["ns"][1][0] if isinstance(outputs["ns"][1], torch.Tensor) else outputs["ns"][1]
-                    if has_dustbin:
-                        n1 = n1 - 1
-                        n2 = n2 - 1
-                    outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
-                    outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
-                    if "gt_perm_mat" in outputs:
-                        outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
-                    outputs["ns"] = [n1, n2]
+                    strip_dustbin_from_outputs(outputs)
 
                     
                     # Get keypoints
                     if 'Ps' in batch:
                         kp0 = batch['Ps'][0][0].cpu().numpy()
                         kp1 = batch['Ps'][1][0].cpu().numpy()
-                        n1_int = int(n1.item()) if isinstance(n1, torch.Tensor) else int(n1)
-                        n2_int = int(n2.item()) if isinstance(n2, torch.Tensor) else int(n2)
+                        n1_int, n2_int = ns_pair_to_ints(outputs, sample_idx=0)
                         kp0 = kp0[:n1_int]
                         kp1 = kp1[:n2_int]
                     else:
@@ -338,24 +220,13 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
                     with torch.no_grad():
                         outputs = match_net(batch)
                     # Mirror debug_final_match post-processing for dustbin handling.
-                    has_dustbin = outputs.get("has_dustbin", False)
-                    n1 = outputs["ns"][0][0] if isinstance(outputs["ns"][0], torch.Tensor) else outputs["ns"][0]
-                    n2 = outputs["ns"][1][0] if isinstance(outputs["ns"][1], torch.Tensor) else outputs["ns"][1]
-                    if has_dustbin:
-                        n1 = n1 - 1
-                        n2 = n2 - 1
-                    outputs["ds_mat"] = strip_dustbin_by_ns(outputs["ds_mat"], n1, n2)
-                    outputs["perm_mat"] = strip_dustbin_by_ns(outputs["perm_mat"], n1, n2)
-                    if "gt_perm_mat" in outputs:
-                        outputs["gt_perm_mat"] = strip_dustbin_by_ns(outputs["gt_perm_mat"], n1, n2)
-                    outputs["ns"] = [n1, n2]
-                    print(n1, n2)
+                    strip_dustbin_from_outputs(outputs)
+                    print(outputs["ns"][0], outputs["ns"][1])
                     
                     if 'Ps' in batch:
                         kp0 = batch['Ps'][0][0].cpu().numpy()
                         kp1 = batch['Ps'][1][0].cpu().numpy()
-                        n1_int = int(n1.item()) if isinstance(n1, torch.Tensor) else int(n1)
-                        n2_int = int(n2.item()) if isinstance(n2, torch.Tensor) else int(n2)
+                        n1_int, n2_int = ns_pair_to_ints(outputs, sample_idx=0)
                         kp0 = kp0[:n1_int]
                         kp1 = kp1[:n2_int]
                     else:
@@ -552,7 +423,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the trained binary classifier")
     parser.add_argument(
         "--dataset",
-        choices=["L3SFV2Augmented", "PolyU-DBII", "PolyU-DBI", "L3-SF"],
+        choices=DATASET_CHOICES,
         default="L3SFV2Augmented",
         help="Dataset to evaluate on",
     )
@@ -570,17 +441,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.data_root is None:
-        if args.dataset == "PolyU-DBII":
-            data_root = "dataset/PolyU/DBII"
-        elif args.dataset == "PolyU-DBI":
-            data_root = "dataset/PolyU/DBI"
-        elif args.dataset == "L3-SF":
-            data_root = "dataset/L3-SF"
-        else:
-            data_root = "dataset/Synthetic"
-    else:
-        data_root = args.data_root
+    data_root = args.data_root or default_data_root(args.dataset)
 
     filter_value = args.filter.lower()
     if filter_value == "none":

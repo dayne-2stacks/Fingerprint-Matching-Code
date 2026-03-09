@@ -104,3 +104,88 @@ def strip_dustbin_by_ns(scores: Tensor, n1, n2) -> Tensor:
             block = block[:nb1, :nb2]
         out[b, :nb1, :nb2] = block
     return out
+
+
+def _ns_entry_to_int(ns_entry, sample_idx: int = 0) -> int:
+    if isinstance(ns_entry, torch.Tensor):
+        flat = ns_entry.reshape(-1)
+        if flat.numel() == 0:
+            return 0
+        idx = min(int(sample_idx), flat.numel() - 1)
+        return int(flat[idx].item())
+    if isinstance(ns_entry, np.ndarray):
+        flat = ns_entry.reshape(-1)
+        if flat.size == 0:
+            return 0
+        idx = min(int(sample_idx), flat.size - 1)
+        return int(flat[idx])
+    if isinstance(ns_entry, (list, tuple)):
+        if len(ns_entry) == 0:
+            return 0
+        idx = min(int(sample_idx), len(ns_entry) - 1)
+        value = ns_entry[idx]
+        if hasattr(value, "item"):
+            return int(value.item())
+        return int(value)
+    try:
+        return int(ns_entry)
+    except (TypeError, ValueError):
+        return 0
+
+
+def ns_pair_to_ints(ns_or_outputs, sample_idx: int = 0) -> tuple[int, int]:
+    ns = ns_or_outputs
+    if isinstance(ns_or_outputs, dict):
+        ns = ns_or_outputs.get("ns")
+    if not isinstance(ns, (list, tuple)) or len(ns) < 2:
+        raise KeyError("Expected an outputs dict or ns pair with two entries")
+    n1 = max(_ns_entry_to_int(ns[0], sample_idx), 0)
+    n2 = max(_ns_entry_to_int(ns[1], sample_idx), 0)
+    return n1, n2
+
+
+def should_strip_dustbin(outputs) -> bool:
+    if outputs is None:
+        return False
+    if bool(outputs.get("has_dustbin", False)):
+        return True
+    gt = outputs.get("gt_perm_mat")
+    if gt is None:
+        return False
+    if not hasattr(gt, "ndim") or gt.ndim < 3 or gt.shape[-2] < 2 or gt.shape[-1] < 2:
+        return False
+    if isinstance(gt, torch.Tensor):
+        row_sum = gt[..., -1, :].sum(dim=-1)
+        col_sum = gt[..., :, -1].sum(dim=-2)
+        return bool((row_sum > 1).any() or (col_sum > 1).any())
+    gt_np = np.asarray(gt)
+    row_sum = gt_np[..., -1, :].sum(axis=-1)
+    col_sum = gt_np[..., :, -1].sum(axis=-2)
+    return bool(np.any(row_sum > 1) or np.any(col_sum > 1))
+
+
+def strip_dustbin_from_outputs(
+    outputs,
+    *,
+    inplace: bool = True,
+    keys=("ds_mat", "perm_mat", "gt_perm_mat"),
+):
+    if outputs is None:
+        return outputs
+    target = outputs if inplace else dict(outputs)
+    if "ns" not in target:
+        return target
+    if not should_strip_dustbin(target):
+        return target
+
+    n1 = target["ns"][0]
+    n2 = target["ns"][1]
+    if bool(target.get("has_dustbin", False)):
+        n1 = n1 - 1
+        n2 = n2 - 1
+
+    for key in keys:
+        if key in target and target[key] is not None:
+            target[key] = strip_dustbin_by_ns(target[key], n1, n2)
+    target["ns"] = [n1, n2]
+    return target

@@ -5,6 +5,7 @@ train:
   K_LR: 1.e-4
   BACKBONE_LR: 5.e-6
   OUTPUT_PATH: results5/joint/stage4
+  PRETRAINED_PATH: results5/joint/stage4/params/best_model.pt
 ngm:
   REGRESSION: true
   DUSTBIN_REJECT_ENABLE: true

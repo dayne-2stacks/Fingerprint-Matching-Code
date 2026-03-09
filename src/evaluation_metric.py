@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from itertools import combinations
+from typing import Tuple
 from utils.hungarian import hungarian
 
 
@@ -57,246 +58,205 @@ def pck(x: Tensor, x_gt: Tensor, perm_mat: Tensor, dist_threshs: Tensor, ns: Ten
     return match_num / total_num
 
 
-def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
-    r"""
-    Matching Recall between predicted permutation matrix and ground truth permutation matrix.
+def _ns_value(ns_entry, batch_idx: int, default_value: int) -> int:
+    if ns_entry is None:
+        return int(default_value)
+    if isinstance(ns_entry, Tensor):
+        flat = ns_entry.reshape(-1)
+        if flat.numel() == 0:
+            return int(default_value)
+        idx = min(int(batch_idx), flat.numel() - 1)
+        return int(flat[idx].item())
+    if isinstance(ns_entry, (list, tuple)):
+        if len(ns_entry) == 0:
+            return int(default_value)
+        idx = min(int(batch_idx), len(ns_entry) - 1)
+        return int(ns_entry[idx])
+    try:
+        return int(ns_entry)
+    except (TypeError, ValueError):
+        return int(default_value)
 
-    .. math::
-        \text{matching recall} = \frac{tr(\mathbf{X}\cdot {\mathbf{X}^{gt}}^\top)}{\sum \mathbf{X}^{gt}}
 
-    :param pmat_pred: :math:`(b\times n_1 \times n_2)` predicted permutation matrix :math:`(\mathbf{X})`
-    :param pmat_gt: :math:`(b\times n_1 \times n_2)` ground truth permutation matrix :math:`(\mathbf{X}^{gt})`
-    :param ns: :math:`(b)` number of exact pairs. We support batched instances with different number of nodes, and
-     ``ns`` is required to specify the exact number of nodes of each instance in the batch.
-    :return: :math:`(b)` matching recall
+def _resolve_ns_pair(ns, batch_idx: int, default_rows: int, default_cols: int):
+    row_entry = None
+    col_entry = None
 
-    .. note::
-        This function is equivalent to "matching accuracy" if the matching problem has no outliers.
-    """
+    if isinstance(ns, (list, tuple)):
+        if len(ns) >= 2:
+            row_entry, col_entry = ns[0], ns[1]
+        elif len(ns) == 1:
+            row_entry = col_entry = ns[0]
+    elif isinstance(ns, Tensor):
+        if ns.ndim == 2:
+            if ns.shape[0] >= 2:
+                row_entry, col_entry = ns[0], ns[1]
+            elif ns.shape[1] >= 2:
+                row_entry, col_entry = ns[:, 0], ns[:, 1]
+            else:
+                row_entry = col_entry = ns.reshape(-1)
+        else:
+            row_entry = col_entry = ns
+    else:
+        row_entry = col_entry = ns
+
+    n_rows = _ns_value(row_entry, batch_idx, default_rows)
+    n_cols = _ns_value(col_entry, batch_idx, default_cols)
+    return max(n_rows, 0), max(n_cols, 0)
+
+
+def _has_dustbin_row_or_col(mat: Tensor) -> bool:
+    if mat.ndim != 2 or mat.shape[0] < 2 or mat.shape[1] < 2:
+        return False
+    return bool((mat[-1, :].sum() > 1) or (mat[:, -1].sum() > 1))
+
+
+def _is_binary_permutation_matrix(mat: Tensor) -> bool:
+    if mat.ndim != 2:
+        return False
+    if not bool(torch.all((mat == 0) | (mat == 1))):
+        return False
+    row_ok = bool(torch.all(torch.sum(mat, dim=-1) <= 1))
+    col_ok = bool(torch.all(torch.sum(mat, dim=-2) <= 1))
+    return row_ok and col_ok
+
+
+def _align_and_strip_dustbin(
+    pmat_pred: Tensor,
+    pmat_gt: Tensor,
+    ns,
+    batch_idx: int,
+) -> Tuple[Tensor, Tensor]:
+    pred_b = pmat_pred[batch_idx]
+    gt_b = pmat_gt[batch_idx]
+
+    default_rows = min(pred_b.shape[0], gt_b.shape[0])
+    default_cols = min(pred_b.shape[1], gt_b.shape[1])
+    n_rows, n_cols = _resolve_ns_pair(ns, batch_idx, default_rows, default_cols)
+
+    row_end = min(max(n_rows, 0), pred_b.shape[0], gt_b.shape[0])
+    col_end = min(max(n_cols, 0), pred_b.shape[1], gt_b.shape[1])
+    pred_b = pred_b[:row_end, :col_end]
+    gt_b = gt_b[:row_end, :col_end]
+
+    common_rows = min(pred_b.shape[0], gt_b.shape[0])
+    common_cols = min(pred_b.shape[1], gt_b.shape[1])
+    pred_b = pred_b[:common_rows, :common_cols]
+    gt_b = gt_b[:common_rows, :common_cols]
+
+    if _has_dustbin_row_or_col(pred_b) or _has_dustbin_row_or_col(gt_b):
+        pred_b = pred_b[:-1, :-1]
+        gt_b = gt_b[:-1, :-1]
+
+    return pred_b, gt_b
+
+
+def _f1_from_precision_recall(precision: Tensor, recall: Tensor) -> Tensor:
+    denom = precision + recall
+    return torch.where(denom > 0, (2 * precision * recall) / denom, torch.zeros_like(denom))
+
+
+def matching_metrics_from_counts(tp: Tensor, tn: Tensor, fp: Tensor, fn: Tensor) -> dict:
+    tp = tp.to(dtype=torch.float32)
+    tn = tn.to(dtype=torch.float32)
+    fp = fp.to(dtype=torch.float32)
+    fn = fn.to(dtype=torch.float32)
+
+    total = tp + tn + fp + fn
+    pred_pos = tp + fp
+    gt_pos = tp + fn
+    pred_neg = tn + fn
+    gt_neg = tn + fp
+
+    accuracy = torch.where(total > 0, (tp + tn) / total, torch.ones_like(total))
+
+    precision_pos = torch.where(pred_pos > 0, tp / pred_pos, (gt_pos == 0).to(tp.dtype))
+    recall_pos = torch.where(gt_pos > 0, tp / gt_pos, (pred_pos == 0).to(tp.dtype))
+    f1_pos = _f1_from_precision_recall(precision_pos, recall_pos)
+
+    precision_neg = torch.where(pred_neg > 0, tn / pred_neg, (gt_neg == 0).to(tp.dtype))
+    recall_neg = torch.where(gt_neg > 0, tn / gt_neg, (pred_neg == 0).to(tp.dtype))
+    f1_neg = _f1_from_precision_recall(precision_neg, recall_neg)
+
+    macro_f1 = (f1_pos + f1_neg) / 2.0
+
+    micro_tp = tp + tn
+    micro_fp = fp + fn
+    micro_fn = fn + fp
+    micro_pred_pos = micro_tp + micro_fp
+    micro_gt_pos = micro_tp + micro_fn
+    micro_precision = torch.where(
+        micro_pred_pos > 0, micro_tp / micro_pred_pos, torch.ones_like(micro_pred_pos)
+    )
+    micro_recall = torch.where(
+        micro_gt_pos > 0, micro_tp / micro_gt_pos, torch.ones_like(micro_gt_pos)
+    )
+    micro_f1 = _f1_from_precision_recall(micro_precision, micro_recall)
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision_pos,
+        "recall": recall_pos,
+        "f1": f1_pos,
+        "micro_f1": micro_f1,
+        "macro_f1": macro_f1,
+        "per_class_precision": torch.stack((precision_neg, precision_pos), dim=-1),
+        "per_class_recall": torch.stack((recall_neg, recall_pos), dim=-1),
+        "per_class_f1": torch.stack((f1_neg, f1_pos), dim=-1),
+    }
+
+
+def matching_classification_metrics(pmat_pred: Tensor, pmat_gt: Tensor, ns) -> dict:
+    """Compute binary matching metrics with dustbin-aware cropping."""
     device = pmat_pred.device
+    pmat_gt = pmat_gt.to(device)
     batch_num = pmat_pred.shape[0]
 
-    pmat_gt = pmat_gt.to(device)
-    # print(pmat_pred.shape, pmat_gt.shape)
-    if pmat_pred.ndim >= 3 and pmat_pred.shape[-2] >= 2 and pmat_pred.shape[-1] >= 2:
-        pred_row_sum = torch.sum(pmat_pred[..., -1, :], dim=-1)
-        pred_col_sum = torch.sum(pmat_pred[..., :, -1], dim=-2)
-        gt_row_sum = torch.sum(pmat_gt[..., -1, :], dim=-1)
-        gt_col_sum = torch.sum(pmat_gt[..., :, -1], dim=-2)
-        if (pred_row_sum > 1).any() or (pred_col_sum > 1).any() or (gt_row_sum > 1).any() or (gt_col_sum > 1).any():
-            pmat_pred = pmat_pred[..., :-1, :-1]
-            pmat_gt = pmat_gt[..., :-1, :-1]
-
-    if pmat_gt.shape != pmat_pred.shape:
-        # Keep whatever overlaps, zero-fill the rest (including extra batch entries)
-        pmat_gt_aligned = torch.zeros_like(pmat_pred)
-
-        b = min(pmat_gt.shape[0], pmat_pred.shape[0])
-        n1 = min(pmat_gt.shape[1], pmat_pred.shape[1])
-        n2 = min(pmat_gt.shape[2], pmat_pred.shape[2])
-
-        pmat_gt_aligned[:b, :n1, :n2] = pmat_gt[:b, :n1, :n2]
-        pmat_gt = pmat_gt_aligned
-
-    if not torch.all((pmat_pred == 0) + (pmat_pred == 1)) or \
-       not (torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)):
-        pmat_pred = hungarian(pmat_pred)
-
-    assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
-    assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
-
-    acc = torch.zeros(batch_num, device=device)
-    # for b in range(batch_num):
-    #     acc[b] = torch.sum(pmat_pred[b, :ns[b]] * pmat_gt[b, :ns[b]]) / torch.sum(pmat_gt[b, :ns[b]])
-
-    # acc[torch.isnan(acc)] = 1
+    tp = torch.zeros(batch_num, device=device, dtype=torch.float32)
+    tn = torch.zeros(batch_num, device=device, dtype=torch.float32)
+    fp = torch.zeros(batch_num, device=device, dtype=torch.float32)
+    fn = torch.zeros(batch_num, device=device, dtype=torch.float32)
 
     for b in range(batch_num):
-        n1 = pmat_pred.shape[1]
-        n2 = pmat_pred.shape[2]
-        ns_b = int(ns[b].item())
-        row_end = min(ns_b, n1 - (1 if n1 == ns_b + 1 else 0))
-        col_end = n2 - (1 if n2 == ns_b + 1 else 0)
-        pmat_gt_b = pmat_gt[b]
-        row_sums = torch.sum(pmat_gt_b, dim=-1)
-        col_sums = torch.sum(pmat_gt_b, dim=-2)
-        bad_rows = row_sums > 1
-        bad_cols = col_sums > 1
-        if bad_rows.any():
-            assert torch.sum(bad_rows) == 1
-        if bad_cols.any():
-            assert torch.sum(bad_cols) == 1
-        num_correct = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt_b[:row_end, :col_end])
-        denom_gt = torch.sum(pmat_gt_b[:row_end, :col_end])
-        denom_pred = torch.sum(pmat_pred[b, :row_end, :col_end])
+        pred_b, gt_b = _align_and_strip_dustbin(pmat_pred, pmat_gt, ns, b)
 
-        # If there is no GT matching (denom_gt == 0), only perfect if we also predict no matching.
-        # Otherwise, penalize (accuracy = 0).
-        if denom_gt == 0:
-            acc[b] = 1.0 if denom_pred == 0 else 0.0
-        else:
-            acc[b] = num_correct / denom_gt
+        if pred_b.numel() == 0 or gt_b.numel() == 0:
+            continue
 
-    acc[torch.isnan(acc)] = 0
+        if not _is_binary_permutation_matrix(pred_b):
+            pred_b = hungarian(pred_b)
 
-    return acc
+        pred_bin = (pred_b > 0.5).to(dtype=torch.bool)
+        gt_bin = (gt_b > 0.5).to(dtype=torch.bool)
+
+        tp[b] = torch.sum(pred_bin & gt_bin).to(dtype=torch.float32)
+        tn[b] = torch.sum((~pred_bin) & (~gt_bin)).to(dtype=torch.float32)
+        fp[b] = torch.sum(pred_bin & (~gt_bin)).to(dtype=torch.float32)
+        fn[b] = torch.sum((~pred_bin) & gt_bin).to(dtype=torch.float32)
+
+    derived = matching_metrics_from_counts(tp, tn, fp, fn)
+    derived.update({"tp": tp, "tn": tn, "fp": fp, "fn": fn})
+    return derived
+
+
+def matching_recall(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
+    return matching_classification_metrics(pmat_pred, pmat_gt, ns)["recall"]
 
 
 def matching_precision(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
-    r"""
-    Matching Precision between predicted permutation matrix and ground truth permutation matrix.
-
-    .. math::
-        \text{matching precision} = \frac{tr(\mathbf{X}\cdot {\mathbf{X}^{gt}}^\top)}{\sum \mathbf{X}}
-
-    :param pmat_pred: :math:`(b\times n_1 \times n_2)` predicted permutation matrix :math:`(\mathbf{X})`
-    :param pmat_gt: :math:`(b\times n_1 \times n_2)` ground truth permutation matrix :math:`(\mathbf{X}^{gt})`
-    :param ns: :math:`(b)` number of exact pairs. We support batched instances with different number of nodes, and
-     ``ns`` is required to specify the exact number of nodes of each instance in the batch.
-    :return: :math:`(b)` matching precision
-
-    .. note::
-        This function is equivalent to "matching accuracy" if the matching problem has no outliers.
-    """
-    device = pmat_pred.device
-    batch_num = pmat_pred.shape[0]
-
-    pmat_gt = pmat_gt.to(device)
-
-    assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
-    assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
-    assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
-
-    precision = torch.zeros(batch_num, device=device)
-    for b in range(batch_num):
-        n1 = pmat_pred.shape[1]
-        n2 = pmat_pred.shape[2]
-        ns_b = int(ns[b].item())
-        row_end = min(ns_b, n1 - (1 if n1 == ns_b + 1 else 0))
-        col_end = n2 - (1 if n2 == ns_b + 1 else 0)
-        pmat_gt_b = pmat_gt[b]
-        row_sums = torch.sum(pmat_gt_b, dim=-1)
-        col_sums = torch.sum(pmat_gt_b, dim=-2)
-        bad_rows = row_sums > 1
-        bad_cols = col_sums > 1
-        if bad_rows.any():
-            assert torch.sum(bad_rows) == 1
-        if bad_cols.any():
-            assert torch.sum(bad_cols) == 1
-        precision[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt_b[:row_end, :col_end]) / torch.sum(
-            pmat_pred[b, :row_end, :col_end]
-        )
-
-    precision[torch.isnan(precision)] = 1
-
-    return precision
+    return matching_classification_metrics(pmat_pred, pmat_gt, ns)["precision"]
 
 
 def matching_recall_varied(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
-    r"""
-    Matching Recall between predicted permutation matrix and ground truth permutation matrix.
-
-    .. math::
-        \text{matching recall} = \frac{tr(\mathbf{X}\cdot {\mathbf{X}^{gt}}^\top)}{\sum \mathbf{X}^{gt}}
-
-    :param pmat_pred: :math:`(b\times n_1 \times n_2)` predicted permutation matrix :math:`(\mathbf{X})`
-    :param pmat_gt: :math:`(b\times n_1 \times n_2)` ground truth permutation matrix :math:`(\mathbf{X}^{gt})`
-    :param ns: :math:`(b\times 2)` number of nodes in all pairs. We support batched instances with different number of nodes, and
-     ``ns`` is required to specify the exact number of nodes of each instance in the batch.
-    :return: :math:`(b)` matching recall
-
-    """
-    device = pmat_pred.device
-    batch_num = pmat_pred.shape[0]
-
-    pmat_gt = pmat_gt.to(device)
-
-    assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
-    assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
-
-    acc = torch.zeros(batch_num, device=device)
-    for b in range(batch_num):
-        ns0 = int(ns[0][b].item())
-        ns1 = int(ns[1][b].item())
-        n1 = pmat_pred[b].shape[0]
-        n2 = pmat_pred[b].shape[1]
-        row_end = min(ns0, n1 - (1 if n1 == ns0 + 1 else 0))
-        col_end = min(ns1, n2 - (1 if n2 == ns1 + 1 else 0))
-        acc[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt[b, :row_end, :col_end]) / torch.sum(
-            pmat_gt[b, :row_end, :col_end]
-        )
-        # acc[b] = torch.sum(pmat_pred[b, :ns[0][b], :ns[1][b]] * pmat_gt[b, :ns[0][b], :ns[1][b]]) / torch.sum(
-        #     pmat_gt[b, :ns[0][b], :ns[1][b]])
-
-    acc[torch.isnan(acc)] = 0
-
-    return acc
+    return matching_recall(pmat_pred, pmat_gt, ns)
 
 
 def matching_precision_varied(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor) -> Tensor:
-    r"""
-    Matching Precision between predicted permutation matrix and ground truth permutation matrix.
-
-    .. math::
-        \text{matching precision} = \frac{tr(\mathbf{X}\cdot {\mathbf{X}^{gt}}^\top)}{\sum \mathbf{X}}
-
-    :param pmat_pred: :math:`(b\times n_1 \times n_2)` predicted permutation matrix :math:`(\mathbf{X})`
-    :param pmat_gt: :math:`(b\times n_1 \times n_2)` ground truth permutation matrix :math:`(\mathbf{X}^{gt})`
-    :param ns: :math:`(b\times 2)` number of nodes in all pairs. We support batched instances with different number of nodes, and
-     ``ns`` is required to specify the exact number of nodes of each instance in the batch.
-    :return: :math:`(b)` matching precision
-
-    """
-    device = pmat_pred.device
-    batch_num = pmat_pred.shape[0]
-
-    pmat_gt = pmat_gt.to(device)
-
-    assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), 'pmat_pred can only contain 0/1 elements.'
-    assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), 'pmat_gt should only contain 0/1 elements.'
-
-    precision = torch.zeros(batch_num, device=device)
-    for b in range(batch_num):
-        ns0 = int(ns[0][b].item())
-        ns1 = int(ns[1][b].item())
-        n1 = pmat_pred[b].shape[0]
-        n2 = pmat_pred[b].shape[1]
-        row_end = min(ns0, n1 - (1 if n1 == ns0 + 1 else 0))
-        col_end = min(ns1, n2 - (1 if n2 == ns1 + 1 else 0))
-        precision[b] = torch.sum(pmat_pred[b, :row_end, :col_end] * pmat_gt[b, :row_end, :col_end]) / torch.sum(
-            pmat_pred[b, :row_end, :col_end]
-        )
-        # precision[b] = torch.sum(pmat_pred[b, :ns[0][b]+1, :ns[1][b]+1] *
-        #                          pmat_gt[b, :ns[0][b]+1, :ns[1][b]+1]) / torch.sum(pmat_pred[b, :ns[0][b]+1, :ns[1][b]+1])
-
-    precision[torch.isnan(precision)] = 0
-
-    return precision
+    return matching_precision(pmat_pred, pmat_gt, ns)
 
 
 def matching_accuracy(pmat_pred: Tensor, pmat_gt: Tensor, ns: Tensor, idx: int) -> Tensor:
-    r"""
-    Matching Accuracy between predicted permutation matrix and ground truth permutation matrix.
-
-    .. math::
-        \text{matching recall} = \frac{tr(\mathbf{X}\cdot {\mathbf{X}^{gt}}^\top)}{\sum \mathbf{X}^{gt}}
-
-    This function is a wrapper of ``matching_recall``.
-
-    :param pmat_pred: :math:`(b\times n_1 \times n_2)` predicted permutation matrix :math:`(\mathbf{X})`
-    :param pmat_gt: :math:`(b\times n_1 \times n_2)` ground truth permutation matrix :math:`(\mathbf{X}^{gt})`
-    :param ns: :math:`(b\times g)` number of nodes in graphs, where :math:`g=2` for 2GM, and :math:`g>2` for MGM. We support batched instances with different number of nodes, and
-     ``ns`` is required to specify the exact number of nodes of each instance in the batch.
-    :param idx: :math:`(int)` index of source graph in the graph pair.
-
-    :return: :math:`(b)` matching accuracy
-
-    .. note::
-        If the graph matching problem has no outliers, it is proper to use this metric and papers call it "matching
-        accuracy". If there are outliers, it is better to use ``matching_precision`` and ``matching_recall``.
-    """
-    
-    return matching_recall(pmat_pred, pmat_gt, ns[idx])
+    return matching_classification_metrics(pmat_pred, pmat_gt, ns)["accuracy"]
 
 
 def format_accuracy_metric(ps: Tensor, rs: Tensor, f1s: Tensor) -> str:

@@ -1,0 +1,26 @@
+train_defaults:
+  num_epochs: 1000
+  BATCH_SIZE: 4
+  OVERFIT_TO_TRAIN_SPLIT: false
+  BM_NAME: L3SFV2AugmentedBenchmark
+  FILTER: null
+  WARMUP_EPOCHS: 10
+  WARMUP_K_EPOCHS: 2
+  LR_DECAY: 0.5
+  PRETRAINED_PATH: ""
+  CHECKPOINT_PATH: checkpoints
+  LOG_DIR: logs/tensorboard
+  start_epoch: 0
+
+policy_defaults:
+  TRAIN_USE_PRED_K: false
+  PERM_LOSS: focal
+  FOCAL_GAMMA: 3.0
+  DUSTBIN_LOSS_WEIGHT: 0.25
+  DUSTBIN_K_MSE_WEIGHT: 1.0
+  DUSTBIN_REJECT_MARGIN: 0.0
+  DETECT_ANOMALY: true
+
+data_defaults:
+  dataset_len: 640
+  train_root: dataset/Synthetic
