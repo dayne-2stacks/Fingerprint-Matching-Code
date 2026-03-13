@@ -1,4 +1,4 @@
-from src.benchmark import L3SFV2AugmentedBenchmark, L3SFBenchmark
+from src.benchmark import L3SFV2AugmentedBenchmark, L3SFBenchmark, PolyUDBIIBenchmark
 from src.gmdataset import RESCALE, GMDataset, get_dataloader
 
 
@@ -15,7 +15,8 @@ def build_dataloaders(
     """
     BM = {
         "L3SFV2AugmentedBenchmark": L3SFV2AugmentedBenchmark,
-        "L3SFBenchmark": L3SFBenchmark
+        "L3SFBenchmark": L3SFBenchmark,
+        "PolyUDBIIBenchmark": PolyUDBIIBenchmark
     }[benchmark_name]
 
     train_split = 'train'
@@ -45,7 +46,8 @@ def build_dataloaders(
 
     ds_name = {
         "L3SFV2AugmentedBenchmark": "L3SFV2Augmented",
-        "L3SFBenchmark": "L3SF"
+        "L3SFBenchmark": "L3SF",
+        "PolyUDBIIBenchmark": "PolyUDBII"
     }[benchmark_name]
     
     # In explicit overfit mode, disable train augmentation and reuse the train split

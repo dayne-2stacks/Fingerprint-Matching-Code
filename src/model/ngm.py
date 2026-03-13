@@ -44,7 +44,7 @@ GNN_FEAT = [16, 16, 16]
 EDGE_EMB = True
 BATCH_SIZE = 4
 
-UNIV_SIZE = 450
+UNIV_SIZE = 600
 SK_ITER_NUM = 20
 SK_EPSILON = 1e-10
 K_FACTOR = 50.0
@@ -606,7 +606,7 @@ class Net(CNN):
                 )
             if n1 == 0 and n2 == 0:
                 continue
-            sample_logits_real_block = match_scores.detach()[b, :n1, :n2]
+            sample_logits_real_block = match_scores[b, :n1, :n2]
             log_transport = log_optimal_transport(sample_logits_real_block / self.tau, self.bin_score, SK_ITER_NUM)
             sample_transport_with_dustbin = torch.exp(log_transport)
             sample_transport_with_dustbin = torch.nan_to_num(

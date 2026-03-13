@@ -174,9 +174,6 @@ class SessionStancePairMixin(ABC):
             random.shuffle(pairs)
             return pairs
 
-        if self.sets == 'train':
-            return _mix_pairs_with_ratio(genuine_pairs, imposter_pairs, TRAIN_GENUINE_RATIO)
-
         pair_count = min(len(genuine_pairs), len(imposter_pairs))
         if pair_count == 0:
             return []
@@ -193,12 +190,12 @@ class PolyUIdParseMixin:
     def _parse_id(self, img_id):
         """Parse an image identifier into (person, session, stance)."""
         parts = img_id.split('_')
-        if len(parts) < 4:
+        if len(parts) < 3:
             return None
         try:
-            person = int(parts[1])
-            session = int(parts[2])
-            stance = int(parts[3])
+            person = int(parts[0])
+            session = int(parts[1])
+            stance = int(parts[2])
             return person, session, stance
         except ValueError:
             return None

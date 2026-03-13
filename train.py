@@ -68,10 +68,10 @@ def _stage_group_label(stage: int) -> str:
     return "full"
 
 
-# STAGE_CONFIG_FILES = ["stage1.yml", "stage2.yml", "stage3.yml", "stage4.yml"]
+STAGE_CONFIG_FILES = ["config/stage1.yml", "config/stage2.yml", "config/stage3.yml", "config/stage4.yml"]
 # STAGE_CONFIG_FILES = ["stage1.yml"]
 # STAGE_CONFIG_FILES = ["stage2.yml", "stage3.yml"]
-STAGE_CONFIG_FILES = ["stage4.yml"]
+# STAGE_CONFIG_FILES = ["stage4.yml"]
 
 GLOBAL_CONFIG_FILE = "config.yml"
 

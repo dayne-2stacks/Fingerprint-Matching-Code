@@ -22,8 +22,11 @@ import random
 import sys
 from typing import List, Tuple
 
+
 import cv2
 import numpy as np
+from src.model.ngm import RESCALE
+from utils.augmentation import _standardize_to_model as _standardize
 
 try:
     from utils.augmentation import apply_single_transform, transforms as AUG_TRANSFORMS
@@ -70,23 +73,6 @@ def read_keypoints(image_path: Path) -> Anno:
                 return []
     return []
 
-
-def standardize_image_and_ann(img: np.ndarray, ann: Anno) -> Tuple[np.ndarray, Anno]:
-    """Resize to 320x320 and center crop to 240x320; adjust keypoints."""
-    h, w = img.shape[:2]
-    resized = cv2.resize(img, (320, 320), interpolation=cv2.INTER_LINEAR)
-    sx, sy = 320 / w, 320 / h
-    ann2 = [[i, x * sx, y * sy] for i, x, y in ann]
-    crop_h, crop_w = 240, 320
-    start_x = (320 - crop_w) // 2
-    start_y = (320 - crop_h) // 2
-    cropped = resized[start_y:start_y + crop_h, start_x:start_x + crop_w]
-    ann3 = [
-        [i, x - start_x, y - start_y]
-        for i, x, y in ann2
-        if start_x <= x < start_x + crop_w and start_y <= y < start_y + crop_h
-    ]
-    return cropped, ann3
 
 
 def draw_keypoints(img: np.ndarray, ann: Anno, color=(0, 255, 0), radius: int = 3, labels: bool = False) -> np.ndarray:
@@ -177,7 +163,7 @@ def main():
     overlay = not (args.no_kpts or args.kpts_off)
 
     # First tile: baseline standardized image
-    base_img, base_ann = standardize_image_and_ann(img, ann)
+    base_img, base_ann = _standardize(img, ann)
     base_vis = draw_keypoints(base_img, base_ann, color=kpt_color, radius=kpt_radius, labels=draw_labels) if (ann and overlay) else base_img
     tiles = [put_label(base_vis, "baseline")] 
 

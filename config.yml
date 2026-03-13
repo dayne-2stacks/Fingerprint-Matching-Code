@@ -1,14 +1,14 @@
 train_defaults:
   num_epochs: 1000
-  BATCH_SIZE: 4
+  BATCH_SIZE: 8
   OVERFIT_TO_TRAIN_SPLIT: false
-  BM_NAME: L3SFV2AugmentedBenchmark
+  BM_NAME: PolyUDBIIBenchmark
   FILTER: null
   WARMUP_EPOCHS: 10
   WARMUP_K_EPOCHS: 2
   LR_DECAY: 0.5
   PRETRAINED_PATH: ""
-  CHECKPOINT_PATH: checkpoints
+  CHECKPOINT_PATH: checkpoint
   LOG_DIR: logs/tensorboard
   start_epoch: 0
 
@@ -23,4 +23,4 @@ policy_defaults:
 
 data_defaults:
   dataset_len: 640
-  train_root: dataset/Synthetic
+  train_root: dataset/PolyU/DBII

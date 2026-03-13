@@ -29,6 +29,7 @@ from pathlib import Path
 from PIL import Image
 from src.gmdataset import RESCALE
 from utils.data import train_test_split
+from utils.keypoints import subject_pore_labels
 
 
 class BaseFingerprintDataset(ABC):
@@ -206,6 +207,54 @@ class BaseFingerprintDataset(ABC):
         self._augment_anno(anno_dict, img_path)
         return anno_dict
 
+class KeypointsForMultiSessionMixin:
+    """
+    Mixin to handle datasets where the same subject may have multiple sessions/images,
+    and keypoints need to be unified across those sessions.
+    """
+    def _get_anno_by_subject(self, anno_path):
+        subject_dict = {}
+        with open(anno_path, 'r') as f:
+            for line in f:
+                anno = json.loads(line)
+                subject = anno['subject']
+
+                if subject_dict.get(subject) is not None:
+                    subject_dict[subject].append(anno)
+                else:
+                    subject_dict[subject] = [anno]
+
+        return subject_dict
+    
+
+    def _get_keypoints(self, img_path):
+        image = img_path.stem
+        keypoints = []
+        base = img_path.parents[3]
+        anno_path = base / "polyU" /"annotations"
+
+    
+        try:
+            mtime = os.path.getmtime(anno_path)
+        except OSError:
+            mtime = None
+        cache_key = (str(anno_path), mtime)
+        cached = self._kpt_cache.get(cache_key)
+        if cached is None:
+            subject_dict = self._get_anno_by_subject(anno_path)
+            cached = subject_pore_labels(subject_dict)
+            self._kpt_cache[cache_key] = cached
+
+        global_label, kp_desc, kps = cached
+
+        for kp in kps[image]:
+            desc = kp_desc[image]
+            label = desc.get_keypoint(kp)
+            if global_label.get(label) is not None: 
+                label = global_label[label]
+            keypoints.append({"labels": label, "x": kp[0], "y": kp[1]})
+
+        return keypoints
 
 class KeypointsFromAnnotationMixin:
     def _get_keypoints(self, img_path):
@@ -327,7 +376,7 @@ class StemPartsIdMixin:
         file_stem = img_path.stem
         parts = file_stem.split('_')
         if len(parts) >= 2:
-            cls_name = f"{parts[0]}_{parts[1]}"
+            cls_name = f"{parts[0]}"
         else:
             cls_name = file_stem
         unique_id = file_stem
@@ -356,7 +405,7 @@ class L3SFV2AugmentedDataset(
 class PolyUDBII(
     StemPartsIdMixin,
     RootDirTrainTestValMixin,
-    KeypointsFromAnnotationMixin,
+    KeypointsForMultiSessionMixin,
     BaseFingerprintDataset,
 ):
     def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/PolyU/DBII',
@@ -397,3 +446,26 @@ if __name__ == "__main__":
     # Build or reuse the processed JSON annotations file
     json_path = dataset_train.to_json()
     print(f"Annotations JSON: {json_path}")
+
+
+# if __name__ == "__main__":
+#     from pathlib import Path
+
+#     class DebugPolyU(KeypointsForMultiSessionMixin, BaseFingerprintDataset):
+#         def _get_root_dirs(self, sets, train_root, test_root, val_root):
+#             return []
+
+#         def _get_ids(self, img_path: Path):
+#             return img_path.stem, img_path.stem
+
+#         def __init__(self):
+#             self.output_dir = Path("tmp")
+#             super().__init__(sets="train", train_root="dataset/PolyU/DBII")
+
+#     ds = DebugPolyU()
+#     img_path = Path("dataset/PolyU/DBII/train/1_2_5.jpg")
+#     kpts = ds._get_keypoints(img_path)
+
+#     for kp in kpts:
+#         print(f"label={kp['labels']} x={kp['x']} y={kp['y']}")
+
