@@ -1,19 +1,24 @@
-train:
-  start_epoch: 50         # Set to a positive integer to resume from a checkpoint
-  num_iterations: 25    # Iterations per epoch
-  BATCH_SIZE: 1
-  K_Optimize: true       # Whether to optimize k (AFA) modules separately
-  K_LOSS: true          # Whether to use k_loss as the primary metric for early stopping
-  LR: 1.e-30              # Learning rate for main network (joint training)
-  BACKBONE_LR: 1.e-30      # Learning rate for backbone parameters
-  K_LR: 2.e-4             # Learning rate for k-regression (AFA) modules
-  LR_DECAY: 0.5          # LR decay factor
-  patience: 3           # Early stopping patience (in epochs)
-
-  MODEL_PATH: results/binary-classifier
-  OUTPUT_PATH: results/binary-classifier
-  PRETRAINED_PATH: 
-  CHECKPOINT_PATH: checkpoints
+train_defaults:
+  num_epochs: 1000
+  BATCH_SIZE: 4 
+  OVERFIT_TO_TRAIN_SPLIT: false
+  # BM_NAME: L3SFBenchmark
+  BM_NAME: PolyUDBIIBenchmark
+  FILTER: null
+  WARMUP_EPOCHS: 10
+  WARMUP_K_EPOCHS: 2
+  LR_DECAY: 0.5
+  PRETRAINED_PATH: ""
+  CHECKPOINT_PATH: checkpoint2
   LOG_DIR: logs/tensorboard
-ngm:
-  REGRESSION: true       # If true, use predicted k in stage 3; otherwise, use ground truth k
+  start_epoch: 0
+
+policy_defaults:
+  PERM_LOSS: focal
+  FOCAL_GAMMA: 2.0
+  DETECT_ANOMALY: true
+
+data_defaults:
+  dataset_len: 640
+  train_root: dataset/Poly2/DBII
+  # train_root: dataset/L3SF_V2/L3-SF

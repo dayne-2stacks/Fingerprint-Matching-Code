@@ -15,7 +15,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from src.train.data_loader import build_dataloaders
 from src.train.training_loop import train_epoch
 from src.train.evaluation import validate_epoch, test_evaluation
-from src.model.ngm import (
+from src.model.ngm2 import (
     Net,
 )
 from utils.data_to_cuda import data_to_cuda
@@ -28,6 +28,16 @@ from utils.scheduler import WarmupScheduler
 from src.model.dustbin import ns_pair_to_ints, strip_dustbin_from_outputs
 # Utility function for generating cv2.DMatch lists
 from utils.matching import build_matches
+from utils.setup import (
+    _load_global_config,
+    _load_stage_config,
+    _collect_stage_output_paths,
+    _stage_from_filename,
+    _stage_group_label,
+    _configure_stage_trainability,
+    _build_optimizers,
+    _default_pretrained_path,
+)
 # from apex import amp
 
 
@@ -35,237 +45,12 @@ from utils.matching import build_matches
 
 start_epoch = float('inf')
 
-
-def _set_batchnorm_eval(module):
-    """Keep BN running stats fixed when backbone/matcher are frozen."""
-    if isinstance(module, _BatchNorm):
-        module.eval()
-
-
-def _stage_from_filename(name: str) -> int:
-    name = name.lower()
-    if "stage1" in name:
-        return 1
-    if "stage2" in name:
-        return 2
-    if "stage3" in name:
-        return 3
-    if "stage4" in name:
-        return 4
-    return 0
-
-
-def _stage_group_label(stage: int) -> str:
-    stage = int(stage)
-    if stage == 1:
-        return "shared_matcher"
-    if stage == 2:
-        return "topk"
-    if stage == 3:
-        return "dustbin"
-    if stage == 4:
-        return "joint"
-    return "full"
-
-
-STAGE_CONFIG_FILES = ["config/stage1.yml", "config/stage2.yml", "config/stage3.yml", "config/stage4.yml"]
+STAGE_CONFIG_FILES = ["config2/stage1.yml", "config2/stage2.yml", "config2/stage3.yml", "config2/stage4.yml"]
 # STAGE_CONFIG_FILES = ["stage1.yml"]
 # STAGE_CONFIG_FILES = ["stage2.yml", "stage3.yml"]
 # STAGE_CONFIG_FILES = ["stage4.yml"]
 
-GLOBAL_CONFIG_FILE = "config.yml"
-
-
-def _load_global_config(cfg_file=GLOBAL_CONFIG_FILE):
-    with open(cfg_file, "r") as f:
-        raw_cfg = yaml.safe_load(f) or {}
-    if not isinstance(raw_cfg, dict):
-        raw_cfg = {}
-
-    return {
-        "train_defaults": raw_cfg.get("train_defaults", {}),
-        "policy_defaults": raw_cfg.get("policy_defaults", {}),
-        "data_defaults": raw_cfg.get("data_defaults", {}),
-    }
-
-
-def _load_stage_config(cfg_file, global_cfg):
-    with open(cfg_file, "r") as f:
-        raw_cfg = yaml.safe_load(f) or {}
-    if not isinstance(raw_cfg, dict):
-        raw_cfg = {}
-
-    train_cfg = raw_cfg.get("train", {})
-    if not isinstance(train_cfg, dict):
-        train_cfg = {}
-    ngm_cfg = raw_cfg.get("ngm", {})
-    if not isinstance(ngm_cfg, dict):
-        ngm_cfg = {}
-
-    cfg = dict(global_cfg.get("train_defaults", {}))
-    cfg.update(global_cfg.get("policy_defaults", {}))
-    cfg.update(train_cfg)
-    cfg.update(
-        {
-            "REGRESSION": bool(ngm_cfg.get("REGRESSION", False)),
-            "DUSTBIN_REJECT_ENABLE": bool(ngm_cfg.get("DUSTBIN_REJECT_ENABLE", False)),
-        }
-    )
-    return cfg
-
-
-def _collect_param_groups(model):
-    groups = {
-        "matcher": [],
-        "backbone_node": [],
-        "backbone_edge": [],
-        "k_head": [],
-        "dustbin": [],
-    }
-
-    for name, param in model.named_parameters():
-        if name.startswith(("encoder_k.", "final_row.", "final_col.")):
-            groups["k_head"].append(param)
-        elif name == "bin_score":
-            groups["dustbin"].append(param)
-        elif name.startswith("node_layers."):
-            groups["backbone_node"].append(param)
-        elif name.startswith(("edge_layers.", "final_layers.")):
-            groups["backbone_edge"].append(param)
-        else:
-            groups["matcher"].append(param)
-    return groups
-
-
-def _set_trainable(params, enabled):
-    for p in params:
-        p.requires_grad = bool(enabled)
-
-
-def _configure_stage_trainability(model, stage):
-    groups = _collect_param_groups(model)
-
-    for _, param in model.named_parameters():
-        param.requires_grad = False
-
-    if stage == 1:
-        # Stage 1: train shared matcher baseline (matcher + backbone), keep k/dustbin frozen.
-        _set_trainable(groups["matcher"], True)
-        _set_trainable(groups["backbone_node"], True)
-        _set_trainable(groups["backbone_edge"], True)
-
-        _set_trainable(groups["k_head"], False)
-        _set_trainable(groups["dustbin"], False)
-    elif stage == 2:
-        _set_trainable(groups["matcher"], False)
-        _set_trainable(groups["backbone_node"], False)
-        _set_trainable(groups["backbone_edge"], False)
-        # Stage 2: keep matcher stable; train K.
-        _set_trainable(groups["k_head"], True)
-        _set_trainable(groups["dustbin"], False)
-
-    elif stage == 3:
-        _set_trainable(groups["matcher"], False)
-        _set_trainable(groups["k_head"], False)
-        _set_trainable(groups["backbone_node"], False)
-        _set_trainable(groups["backbone_edge"], False)
-        # Stage 3: train dustbin only.
-        _set_trainable(groups["dustbin"], True)
-    elif stage == 4:
-        # Stage 4: joint fine-tuning of all modules.
-        _set_trainable(groups["matcher"], True)
-        _set_trainable(groups["k_head"], True)
-        _set_trainable(groups["backbone_node"], True)
-        _set_trainable(groups["backbone_edge"], True)
-        _set_trainable(groups["dustbin"], True)
-    else:
-        # Fallback: full fine-tuning.
-        for _, param in model.named_parameters():
-            param.requires_grad = True
-
-    return groups
-
-
-def _build_optimizers(model, groups, lr, backbone_lr, k_lr):
-    k_params = [p for p in groups["k_head"] if p.requires_grad]
-    k_ids = {id(p) for p in k_params}
-
-    backbone_params = [
-        p
-        for p in (groups["backbone_node"] + groups["backbone_edge"])
-        if p.requires_grad and id(p) not in k_ids
-    ]
-    backbone_ids = {id(p) for p in backbone_params}
-
-    main_params = [
-        p
-        for p in model.parameters()
-        if p.requires_grad and id(p) not in k_ids and id(p) not in backbone_ids
-    ]
-
-    model_param_groups = []
-    if main_params:
-        model_param_groups.append(
-            {"params": main_params, "lr": float(lr), "base_lr": float(lr), "name": "main"}
-        )
-    if backbone_params:
-        model_param_groups.append(
-            {
-                "params": backbone_params,
-                "lr": float(backbone_lr),
-                "base_lr": float(backbone_lr),
-                "name": "backbone",
-            }
-        )
-
-    if not model_param_groups:
-        if k_params:
-            # Some stages (e.g. stage2 after removing the auth head) only train the K head.
-            # In that case, fall back to a single optimizer over the K params to keep the
-            # training loop contract unchanged.
-            optimizer = optim.AdamW(
-                [{"params": k_params, "lr": float(k_lr), "base_lr": float(k_lr), "name": "k_head"}],
-                lr=float(k_lr),
-                weight_decay=1e-4,
-            )
-            return optimizer, None
-        raise RuntimeError("No trainable parameters were selected for the main optimizer.")
-
-    optimizer = optim.AdamW(model_param_groups, lr=float(lr), weight_decay=1e-4)
-    optimizer_k = None
-    if k_params:
-        optimizer_k = optim.AdamW(
-            [{"params": k_params, "lr": float(k_lr), "base_lr": float(k_lr), "name": "k_head"}],
-            lr=float(k_lr),
-            weight_decay=1e-4,
-        )
-    return optimizer, optimizer_k
-
-
-def _default_pretrained_path(stage_output_paths, stage):
-    chain = {
-        2: 1,
-        3: 2,
-        4: 3,
-    }
-    source_stage = chain.get(int(stage))
-    if source_stage is None:
-        return ""
-    source_output_path = stage_output_paths.get(int(source_stage), "")
-    if not source_output_path:
-        return ""
-    print(f"Stage {stage} default pretrained path: {source_output_path}")
-    return str(Path(source_output_path) / "params" / "best_model.pt")
-
-
-def _collect_stage_output_paths(config_file_list, stage_configs):
-    stage_output_paths = {}
-    for cfg_file in config_file_list:
-        stage = _stage_from_filename(cfg_file)
-        if stage <= 0:
-            continue
-        stage_output_paths[int(stage)] = stage_configs[cfg_file]["OUTPUT_PATH"]
-    return stage_output_paths
+GLOBAL_CONFIG_FILE = "settings.yml"
 
 
 global_cfg = _load_global_config(GLOBAL_CONFIG_FILE)
@@ -330,19 +115,13 @@ for file in config_files:
     WARMUP_K_EPOCHS = int(stage_cfg["WARMUP_K_EPOCHS"])
 
     REGRESSION = bool(stage_cfg["REGRESSION"])
-    TRAIN_USE_PRED_K = bool(stage_cfg["TRAIN_USE_PRED_K"])
-    DUSTBIN_LOSS_WEIGHT = float(stage_cfg["DUSTBIN_LOSS_WEIGHT"])
-    DUSTBIN_K_MSE_WEIGHT = float(stage_cfg.get("DUSTBIN_K_MSE_WEIGHT", 1.0))
-    DUSTBIN_REJECT_ENABLE = bool(stage_cfg["DUSTBIN_REJECT_ENABLE"])
-    DUSTBIN_REJECT_MARGIN = float(stage_cfg["DUSTBIN_REJECT_MARGIN"])
     DETECT_ANOMALY = bool(stage_cfg["DETECT_ANOMALY"])
     FOCAL_GAMMA = float(stage_cfg.get("FOCAL_GAMMA", 1.0))
-    STAGE1_SS_BASE_AUX_WEIGHT = float(stage_cfg.get("STAGE1_SS_BASE_AUX_WEIGHT", 0.25))
+
 
     print("BACKBONE_LR =", BACKBONE_LR)
     print("Start epoch: ", start_epoch)
-    if stage == 1:
-        print("STAGE1_SS_BASE_AUX_WEIGHT =", STAGE1_SS_BASE_AUX_WEIGHT)
+
 
     
     # =====================================================
@@ -366,15 +145,6 @@ for file in config_files:
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
-    if DUSTBIN_LOSS_WEIGHT >= DUSTBIN_K_MSE_WEIGHT:
-        warn_msg = (
-            "Configured dustbin BCE weight is not lower than OT-K MSE weight: "
-            f"DUSTBIN_LOSS_WEIGHT={DUSTBIN_LOSS_WEIGHT}, "
-            f"DUSTBIN_K_MSE_WEIGHT={DUSTBIN_K_MSE_WEIGHT}. "
-            "This is allowed, but the intended default is BCE < OT-K MSE."
-        )
-        print(f"[WARN] {warn_msg}")
-        logger.warning(warn_msg)
 
 
    
@@ -389,28 +159,24 @@ for file in config_files:
         benchmark_name=BM_NAME,
         filter=FILTER,
         overfit_to_train_split=OVERFIT_TO_TRAIN_SPLIT,
+        stage=stage,
     )
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
     model = Net(
-        regression=REGRESSION,
-        dustbin_loss_weight=DUSTBIN_LOSS_WEIGHT,
-        dustbin_k_mse_weight=DUSTBIN_K_MSE_WEIGHT,
-        dustbin_reject_enable=DUSTBIN_REJECT_ENABLE,
-        dustbin_reject_margin=DUSTBIN_REJECT_MARGIN,
-        train_use_pred_k=TRAIN_USE_PRED_K,
+        # regression=REGRESSION,
+
     )
 
-    # criterion = FocalLoss(gamma=FOCAL_GAMMA)
-    criterion = PermutationLossHung()
+    criterion = FocalLoss(gamma=FOCAL_GAMMA)
+    # criterion = PermutationLoss()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
     # Uncomment below if using multiple GPUs:
     # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
     # model, optimizer = amp.initialize(model, optimizer)
-
 
     # =====================================================
     # Stage-wise progressive unfreezing
@@ -441,11 +207,11 @@ for file in config_files:
                                             #    milestones=milestones,
                                             #    gamma=LR_DECAY,
                                             #    last_epoch=-1)    
-    # main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=LR_DECAY)
+    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=LR_DECAY)
     # if stage in ( 2, 3):
     #     main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=LR * 1e-3)
     # scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
-    main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30, eta_min=LR * 1e-3)
+    # main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=LR * 1e-3)
     scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, after_scheduler=main_scheduler)
 
     if optimizer_k is not None:
@@ -484,19 +250,9 @@ for file in config_files:
     if len(optim_k_path) > 0:
         print("Loading optimizer_k state from {}".format(optim_k_path))
         load_optimizer(optimizer_k, optim_k_path)
-    # Initialize warmup scheduler learning rates after loading optimizer state
-    # if start_epoch == 0:  # Only for fresh training, not resuming
-    print("Initializing warmup learning rates for first epoch...")
-    warmup_main = max(int(warmup_epochs), 1)
-    for param_group in optimizer.param_groups:
-        base_lr = float(param_group.get("base_lr", param_group.get("lr", LR)))
-        param_group['lr'] = base_lr / warmup_main
-    
-    if optimizer_k is not None and scheduler_k is not None:
-        warmup_k = max(int(warmup_k_epochs), 1)
-        for param_group in optimizer_k.param_groups:
-            base_lr = float(param_group.get("base_lr", param_group.get("lr", K_LR)))
-            param_group['lr'] = base_lr / warmup_k
+    # WarmupScheduler already applies the initial warmup step when it is created.
+    # Avoid manually scaling LRs here, or the first-epoch LR is reduced twice.
+    print("Warmup schedulers initialized; keeping scheduler-managed starting learning rates.")
 
 
     # best_model_path = str(checkpoint_path / "best_model.pt")
@@ -530,7 +286,6 @@ for file in config_files:
             for i, param_group in enumerate(optimizer_k.param_groups):
                 writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
 
-        writer.add_scalar('Train/Train_Use_Pred_K', float(bool(TRAIN_USE_PRED_K)), epoch)
 
         # Train for one epoch
         avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy = train_epoch(
@@ -548,7 +303,6 @@ for file in config_files:
             checkpoint_path,
             detect_anomaly=DETECT_ANOMALY,
             max_iters=num_iterations,
-            stage1_ss_base_aux_weight=STAGE1_SS_BASE_AUX_WEIGHT,
         )
             
         # =====================================================
@@ -563,7 +317,6 @@ for file in config_files:
             epoch,
             logger,
             stage,
-            stage1_ss_base_aux_weight=STAGE1_SS_BASE_AUX_WEIGHT,
         )
     
         
@@ -592,15 +345,15 @@ for file in config_files:
 
         # Step LR schedulers
         if stage == 2:
-            # scheduler.step(avg_ks_loss)
-            scheduler.step()
+            scheduler.step(avg_ks_loss)
+            # scheduler.step()
         elif stage == 3:
-            # scheduler.step(avg_val_total)
-            scheduler.step()
+            scheduler.step(avg_val_total)
+            # scheduler.step()
 
         else:
-            # scheduler.step(avg_val_loss)
-            scheduler.step()
+            scheduler.step(avg_val_loss)
+            # scheduler.step()
 
         if optimizer_k is not None:
             # scheduler_k.step()
@@ -612,10 +365,10 @@ for file in config_files:
         lr_reduced = any(clr < plr for clr, plr in zip(curr_lr, prev_lr))
         prev_lr = curr_lr  # Update previous for next iteration
 
-        if lr_reduced:
-            print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
-            best_model_path = str(checkpoint_path / "best_model.pt")
-            load_model(model, best_model_path)
+        # if lr_reduced:
+        #     print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
+        #     best_model_path = str(checkpoint_path / "best_model.pt")
+        #     load_model(model, best_model_path)
 
         last_epoch = epoch
             

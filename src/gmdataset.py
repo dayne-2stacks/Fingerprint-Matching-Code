@@ -44,7 +44,7 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=145
-DATALOADER_NUM=0
+DATALOADER_NUM=2
 
 # class GMDataset(Dataset):
 #     def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
@@ -115,6 +115,22 @@ class GMDataset(Dataset):
         # For classification we rely on the genuine/imposter pairs
         pairs, total_len = self.bm.get_rand_id_combination()
 
+        # selected_classes = self.bm.classes[:2]
+        # allowed_ids = set()
+
+        # for cls_name in selected_classes:
+        #     cls_ids = [
+        #         img_id for img_id, anno in self.bm.data_dict.items()
+        #         if anno["cls"] == cls_name
+        #     ][:2]
+        #     allowed_ids.update(cls_ids)
+
+        # pairs[0] = [
+        #     pair for pair in pairs[0]
+        #     if pair[0] in allowed_ids and pair[1] in allowed_ids
+        # ]
+        # total_len = len(pairs[0])
+
         if self.bm.sets == 'test':
             # In test mode always use the full set of pairs
             self.length = total_len
@@ -169,13 +185,13 @@ class GMDataset(Dataset):
             cols = label_to_cols.get(label)
             if not cols:
                 continue
-            pair_count = min(len(rows), len(cols))
-            for k in range(pair_count):
-                i = rows[k]
-                j = cols[k]
-                perm_mat[i, j] = 1.0
-                matched_rows.add(i)
-                matched_cols.add(j)
+            if len(rows) != 1 or len(cols) != 1:
+                continue
+            i = rows[0]
+            j = cols[0]
+            perm_mat[i, j] = 1.0
+            matched_rows.add(i)
+            matched_cols.add(j)
 
         if n1 > 0:
             unmatched_rows = [i for i in range(n1) if i not in matched_rows]
@@ -274,7 +290,9 @@ class GMDataset(Dataset):
         img_path1 = self.bm.get_path(pair[0])
         img_path2 = self.bm.get_path(pair[1])
         img1_orig = cv2.imread(img_path1)
+        img1_orig = cv2.cvtColor(img1_orig, cv2.COLOR_BGR2RGB)
         img2_orig = cv2.imread(img_path2)
+        img2_orig = cv2.cvtColor(img2_orig, cv2.COLOR_BGR2RGB)
         annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]
         (img1, annos1_filtered), (img2, annos2_filtered) = self._augment_or_standardize_pair_diff(
@@ -407,6 +425,7 @@ def collate_fn(data: list):
                 k = ks[0]
                 if k == 'gt_perm_mat' and ns_pairs is not None:
                     has_dustbin = True
+                    has_dustbin = False
                     for mat, (n1, n2) in zip(vs, ns_pairs):
                         shape = mat.shape
                         if shape[0] != n1 + 1 or shape[1] != n2 + 1:

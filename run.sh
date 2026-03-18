@@ -25,6 +25,5 @@ cd $WORKDIR
 # -----------------------------------
 # Run training inside container
 # -----------------------------------
-# apptainer shell --writable --nv $CONTAINER
 apptainer shell     --nv      --bind /data:/data      --pwd $WORKDIR $CONTAINER 
 # python train.py

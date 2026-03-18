@@ -28,29 +28,30 @@ logger = logging.getLogger(__name__)
 
 
 # Params
-FEATURE_CHANNEL_NODE = 256  # ResNet34 layer3 channels
+FEATURE_CHANNEL_NODE = 256 # ResNet34 layer3 channels
 FEATURE_CHANNEL_EDGE = 512  # ResNet34 layer4 channels
-NODE_FEATURE_DIM = FEATURE_CHANNEL_NODE + FEATURE_CHANNEL_EDGE  # 768
-GLOBAL_FEATURE_DIM = FEATURE_CHANNEL_EDGE  # 512
-GLOBAL_STATE_DIM = GLOBAL_FEATURE_DIM * 2  # 1024
+# FEATURE_CHANNEL_NODE = 56
+# FEATURE_CHANNEL_EDGE = 448
+NODE_FEATURE_DIM = FEATURE_CHANNEL_NODE + FEATURE_CHANNEL_EDGE  # 1392
+GLOBAL_FEATURE_DIM = FEATURE_CHANNEL_EDGE  # 1280
+GLOBAL_STATE_DIM = GLOBAL_FEATURE_DIM * 2  # 2560
 
 FIRST_ORDER = True
 POSITIVE_EDGES = True
 GNN_LAYER = 3
-SK_TAU= 0.005
-# SK_TAU = 0.01
-SK_EMB = 3
+# SK_TAU= 0.005
+SK_TAU = 0.01
+SK_EMB = 1
 GNN_FEAT = [16, 16, 16]
-EDGE_EMB = True
+EDGE_EMB = False
 BATCH_SIZE = 4
 
 UNIV_SIZE = 600
-SK_ITER_NUM = 20
+SK_ITER_NUM = 25
 SK_EPSILON = 1e-10
-K_FACTOR = 50.0
-DUSTBIN_LOSS_WEIGHT = 1.0
-RESCALE = (256, 256)
-CROPSIZE = (224, 224)
+K_FACTOR = 5.0
+RESCALE = (320, 240)
+CROPSIZE = (240, 240)
 
 
 
@@ -60,11 +61,10 @@ def _compute_k_match_count(
     min_points,
     *,
     training,
-    train_use_pred_k,
     no_pair_mask,
 ):
     if training:
-        k_match = k_pred_count if bool(train_use_pred_k) else gt_ks
+        k_match = gt_ks
         # print(k_match)
         # If a pair is an imposter
         if no_pair_mask is not None:
@@ -79,73 +79,6 @@ def _compute_k_match_count(
     # k_match = torch.clamp(k_match, min=0.0)
     k_match = torch.minimum(k_match, min_points)
     return k_match
-
-
-def _dustbin_supervision_loss(pred, gt, nrows, ncols):
-    loss = pred.new_tensor(0.0)
-    count = pred.new_tensor(0.0)
-    eps = 1e-6
-    # For each prediction in the batch
-    for b in range(pred.shape[0]):
-        n1 = int(nrows[b].item())
-        n2 = int(ncols[b].item())
-        if n1 > 0:
-            pred_col = pred[b, :n1, n2].clamp(min=eps, max=1.0 - eps)
-            gt_col = gt[b, :n1, n2].to(pred.dtype)
-            loss += F.binary_cross_entropy(pred_col, gt_col, reduction="sum")
-            count += n1
-        if n2 > 0:
-            pred_row = pred[b, n1, :n2].clamp(min=eps, max=1.0 - eps)
-            gt_row = gt[b, n1, :n2].to(pred.dtype)
-            loss += F.binary_cross_entropy(pred_row, gt_row, reduction="sum")
-            count += n2
-    if count > 0:
-        loss = loss / count
-    return loss
-
-
-def _dustbin_soft_k_from_transport(transport_with_dustbin, nrows, ncols):
-    """Estimate a soft match count K from OT dustbin mass.
-
-    Uses the active dustbin row/col indices (n1, n2) for each sample 
-    """
-    batch_size = int(transport_with_dustbin.shape[0])
-    k_vals = []
-    k_rows_vals = []
-    k_cols_vals = []
-    for b in range(batch_size):
-        n1 = int(nrows[b].item())
-        n2 = int(ncols[b].item())
-        max_k = float(min(max(n1, 0), max(n2, 0)))
-        if n1 <= 0 or n2 <= 0:
-            zero = transport_with_dustbin.new_tensor(0.0)
-            k_vals.append(zero)
-            k_rows_vals.append(zero)
-            k_cols_vals.append(zero)
-            continue
-
-        # Active dustbin column sits at index n2 and active dustbin row at n1.
-        row_dustbin_mass = transport_with_dustbin[b, :n1, n2].sum()
-        col_dustbin_mass = transport_with_dustbin[b, n1, :n2].sum()
-
-        n1_t = transport_with_dustbin.new_tensor(float(n1))
-        n2_t = transport_with_dustbin.new_tensor(float(n2))
-        k_hat_rows = n1_t - row_dustbin_mass
-        k_hat_cols = n2_t - col_dustbin_mass
-        k_hat = 0.5 * (k_hat_rows + k_hat_cols)
-        k_hat = torch.clamp(k_hat, min=0.0, max=max_k)
-        k_hat_rows = torch.clamp(k_hat_rows, min=0.0, max=max_k)
-        k_hat_cols = torch.clamp(k_hat_cols, min=0.0, max=max_k)
-
-        k_vals.append(torch.nan_to_num(k_hat, nan=0.0, posinf=max_k, neginf=0.0))
-        k_rows_vals.append(torch.nan_to_num(k_hat_rows, nan=0.0, posinf=max_k, neginf=0.0))
-        k_cols_vals.append(torch.nan_to_num(k_hat_cols, nan=0.0, posinf=max_k, neginf=0.0))
-
-    if not k_vals:
-        empty = transport_with_dustbin.new_zeros((0,), dtype=torch.float32)
-        return empty, empty, empty
-    return torch.stack(k_vals), torch.stack(k_rows_vals), torch.stack(k_cols_vals)
-
 
 # Return as iterable combinations
 def lexico_iter(lex):
@@ -167,18 +100,6 @@ def normalize_keypoints(kpts, image_shape):
     return (kpts - center[:, None, :]) / scaling[:, None, :]
 
 
-def _nan_stats(tag, x):
-    if x is None:
-        logger.info("%s: None", tag)
-        return
-    logger.info(
-        "%s: nan=%s inf=%s min=%s max=%s",
-        tag,
-        torch.isnan(x).any().item(),
-        torch.isinf(x).any().item(),
-        x.min().item(),
-        x.max().item(),
-    )
 
 
 def concat_features(embeddings, num_vertices):
@@ -228,11 +149,6 @@ class Net(CNN):
         self,
         regression: bool = False,
         mean_k: bool = True,
-        dustbin_loss_weight: float = 0.5,
-        dustbin_k_mse_weight: float = 1.0,
-        dustbin_reject_enable: bool = False,
-        dustbin_reject_margin: float = 0.0,
-        train_use_pred_k: bool = False,
     ):
         super(Net, self).__init__()  # initialize the VGG16 model
 
@@ -287,8 +203,7 @@ class Net(CNN):
         self.cropsize = CROPSIZE
         self.univ_size = UNIV_SIZE
         self.k_factor = K_FACTOR
-        self.dustbin_loss_weight = float(dustbin_loss_weight)
-        self.dustbin_k_mse_weight = float(dustbin_k_mse_weight)
+
 
         # Classify fingerprint
         self.classifier = nn.Linear(GNN_FEAT[-1] + SK_EMB, 1)
@@ -303,9 +218,7 @@ class Net(CNN):
         self.regression = bool(regression)
         self.mean_k = bool(mean_k)
         self.bin_score = nn.Parameter(torch.tensor(1.0))
-        self.train_use_pred_k = bool(train_use_pred_k)
-        self.dustbin_reject_enable = bool(dustbin_reject_enable)
-        self.dustbin_reject_margin = float(max(float(dustbin_reject_margin), 0.0))
+
 
         
         self.k_params_id = []
@@ -334,18 +247,23 @@ class Net(CNN):
             {"params": self.final_col.parameters()},
         ]
 
-    def forward(self, data_dict, regression=True):
-        stage_raw = data_dict.get("stage_id", -1)
-        if isinstance(stage_raw, torch.Tensor):
-            stage_id = int(stage_raw.reshape(-1)[0].item()) if stage_raw.numel() > 0 else -1
-        elif isinstance(stage_raw, (list, tuple)):
-            stage_id = int(stage_raw[0]) if len(stage_raw) > 0 else -1
-        else:
-            try:
-                stage_id = int(stage_raw)
-            except (TypeError, ValueError):
-                stage_id = -1
-        stage1_mode = stage_id == 1
+        self.k_embedding_dim = self.encoder_k.model_params["embedding_dim"]
+
+        self.k_row_init = nn.Sequential(
+            nn.Linear(self.message_pass_node_features.num_node_features, 256),
+            nn.ReLU(),
+            nn.Linear(256, self.k_embedding_dim),
+        )
+
+        self.k_col_init = nn.Sequential(
+            nn.Linear(self.message_pass_node_features.num_node_features, 256),
+            nn.ReLU(),
+            nn.Linear(256, self.k_embedding_dim),
+        )
+
+
+    def forward(self, data_dict, stage=None):
+
         # if any of the k parameters require gradients, set k_trainable
         k_trainable = any(
             bool(p.requires_grad)
@@ -367,11 +285,15 @@ class Net(CNN):
         n_points = data_dict["ns"]  # number of pores
         graphs = data_dict["pyg_graphs"]  # Generated by GMDataset
         num_graphs = len(images)  # number of fingerprints
-        log_nans = not getattr(self, "_nan_debug_done", False)
-
+  
+        # List for global features and graphs
         global_features = []
         processed_graphs = []
+        graph_node_descs = []
+
+        # For each graph
         for image, point, num_p, graph in zip(images, points, n_points, graphs):
+            # get the image
             if image.dim() == 3:
                 image = image.unsqueeze(0)
 
@@ -383,6 +305,7 @@ class Net(CNN):
             global_feature = self.final_layers(edge_maps).reshape((node_maps.shape[0], -1))
             global_features.append(global_feature)
 
+            # Normalize node and edge features over channels
             node_maps = normalize_over_channels(node_maps)
             edge_maps = normalize_over_channels(edge_maps)
             
@@ -393,17 +316,22 @@ class Net(CNN):
             node_features = torch.cat((node_desc, edge_desc), dim=1)
             
             # Add positional embedding
-            pos = normalize_keypoints(point, image.shape)
-            pos_emb = self.pos_mlp(pos).permute(0, 2, 1)
-            pos_emb = concat_features(pos_emb, num_p)
-            node_features = node_features + pos_emb
+            # pos = normalize_keypoints(point, image.shape)
+            # pos_emb = self.pos_mlp(pos).permute(0, 2, 1)
+            # pos_emb = concat_features(pos_emb, num_p)
+            # node_features = node_features + pos_emb
             graph.x = node_features
-
+            # Create edge features from node features using SplineConv
             graph = self.message_pass_node_features(graph)
-
             edge_graph = self.build_edge_features_from_node_features(graph)
             processed_graphs.append(edge_graph)
 
+
+            padded = torch.stack(pad_tensor([item.x for item in edge_graph]), dim=0)
+            graph_node_descs.append(padded)
+
+
+        # Get flobal features and compute affinities for each pair of graphs
         global_weights_list = [
             torch.cat([global_src, global_tgt], axis=-1)
             for global_src, global_tgt in lexico_iter(global_features)
@@ -422,7 +350,6 @@ class Net(CNN):
 
         quadratic_affs_list = [[0.5 * x for x in quadratic_affs] for quadratic_affs in quadratic_affs_list]
 
-        pair_indices = list(lexico_iter(range(num_graphs)))
 
         for unary_affs, quadratic_affs, (idx1, idx2) in zip(unary_affs_list, quadratic_affs_list, lexico_iter(range(num_graphs))):
             Kp = torch.stack(pad_tensor(unary_affs), dim=0)
@@ -455,6 +382,8 @@ class Net(CNN):
                     sparse_sizes=(sparse_size, sparse_size),
                 )
                 tmp_emb = emb[b].unsqueeze(0)
+
+                # Run GNN layers
                 for i in range(self.gnn_layer):
                     gnn_layer = getattr(self, "gnn_layer_{}".format(i))
                     tmp_emb = gnn_layer(adj, tmp_emb, n_points[idx1], n_points[idx2], b)
@@ -465,183 +394,157 @@ class Net(CNN):
             match_scores = logits.view(logits.shape[0], Kp.shape[2], Kp.shape[1]).transpose(1, 2)
 
 
-        # Doubly stochastic matrix for K head (AFAU path)
-        ss_base = self.sinkhorn(match_scores, n_points[idx1], n_points[idx2], dummy_row=True)
-        ds_mat_matcher = torch.nan_to_num(ss_base, nan=0.0, posinf=0.0, neginf=0.0)
+            # Doubly stochastic matrix for K head (AFAU path)
+            ss_base = self.sinkhorn(match_scores, n_points[idx1], n_points[idx2], dummy_row=True)
 
-        batch_size, max_n1_transport, max_n2_transport = match_scores.shape
-        nrows = n_points[idx1].to(match_scores.device).view(-1)
-        ncols = n_points[idx2].to(match_scores.device).view(-1)
+            batch_size, max_n1, max_n2 = match_scores.shape
+            nrows = n_points[idx1].to(match_scores.device).view(-1)
+            ncols = n_points[idx2].to(match_scores.device).view(-1)
 
-        min_point_tensor = torch.minimum(nrows, ncols).to(dtype=torch.float32)
-        # if self.training and data_dicKpt.get("label") is not None:
-        #     labels = data_dict["label"].to(match_scores.device).view(-1).long()
-        #     imposter_mask = labels == 0
-        #     if imposter_mask.any():
-        #         min_point_tensor = torch.where(imposter_mask, torch.zeros_like(min_point_tensor), min_point_tensor)
-        min_point_tensor_safe = torch.clamp(min_point_tensor, min=1.0)
-        gt_perm_mat = data_dict.get("gt_perm_mat")
-        if gt_perm_mat is None:
-            gt_ks = torch.zeros(batch_size, dtype=torch.float32, device=match_scores.device)
-        else:
-            if gt_perm_mat.ndim != 3:
-                raise ValueError(f"Expected gt_perm_mat to be 3D, got shape {tuple(gt_perm_mat.shape)}")
-            if gt_perm_mat.shape[0] != batch_size:
-                raise ValueError(
-                    f"gt_perm_mat batch mismatch: expected {batch_size}, got {gt_perm_mat.shape[0]}"
-                )
-            max_n1_local = int(nrows.max().item()) if batch_size > 0 else 0
-            max_n2_local = int(ncols.max().item()) if batch_size > 0 else 0
-            if gt_perm_mat.shape[1] < max_n1_local or gt_perm_mat.shape[2] < max_n2_local:
-                raise ValueError(
-                    "gt_perm_mat is smaller than requested n_points real block: "
-                    f"gt_perm_mat={tuple(gt_perm_mat.shape)}, max_n1={max_n1_local}, max_n2={max_n2_local}"
-                )
-            gt_ks = torch.tensor(
-                [
-                    torch.sum(
-                        gt_perm_mat[b, : int(nrows[b].item()), : int(ncols[b].item())]
-                    )
-                    for b in range(batch_size)
-                ],
-                dtype=torch.float32,
-                device=match_scores.device,
-            )
-        no_pair_mask = None
-        if self.training:
-            if "label" in data_dict:
-                labels = data_dict["label"].to(match_scores.device).view(-1).long()
-                imposter_mask = labels == 0
-                if imposter_mask.any():
-                    gt_ks = gt_ks.clone()
-                    gt_ks[imposter_mask] = 0.0
-                no_pair_mask = imposter_mask | (gt_ks == 0)
+            min_point_tensor = torch.minimum(nrows, ncols).to(dtype=torch.float32)
+            
+            
+            gt_perm_mat = data_dict.get("gt_perm_mat")
+            if gt_perm_mat is None:
+                gt_ks = torch.zeros(batch_size, dtype=torch.float32, device=match_scores.device)
             else:
-                no_pair_mask = gt_ks == 0
-
-        if self.regression:
-            dummy_row = self.univ_size - ss_base.shape[1]
-            dummy_col = self.univ_size - ss_base.shape[2]
-            if dummy_row < 0 or dummy_col < 0:
-                raise ValueError(
-                    f"AFAU univ_size={self.univ_size} is smaller than sinkhorn score size "
-                    f"({ss_base.shape[1]}, {ss_base.shape[2]})"
-                )
-            max_n1_k = int(torch.max(nrows).item()) if nrows.numel() > 0 else 0
-            max_n2_k = int(torch.max(ncols).item()) if ncols.numel() > 0 else 0
-            init_row_emb = torch.zeros(
-                (batch_size, max_n1_k, self.univ_size),
-                dtype=torch.float32,
-                device=ss_base.device,
-            )
-            init_col_emb = torch.zeros(
-                (batch_size, max_n2_k, self.univ_size),
-                dtype=torch.float32,
-                device=ss_base.device,
-            )
-            for b in range(batch_size):
-                n2_b = int(ncols[b].item())
-                if n2_b <= 0:
-                    continue
-                index = torch.arange(n2_b, dtype=torch.long, device=ss_base.device).unsqueeze(1)
-                init_col_emb_one = torch.zeros(
-                    max_n2_k,
-                    self.univ_size,
+                gt_ks = torch.tensor(
+                    [
+                        torch.sum(
+                            gt_perm_mat[b, : int(nrows[b].item()), : int(ncols[b].item())]
+                        )
+                        for b in range(batch_size)
+                    ],
                     dtype=torch.float32,
-                    device=ss_base.device,
-                ).scatter_(1, index, 1)
-                init_col_emb[b] = init_col_emb_one
-            out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss_base)
-            out_emb_row = F.pad(out_emb_row, (0, 0, 0, dummy_row), value=float("-inf")).permute(0, 2, 1)
-            out_emb_col = F.pad(out_emb_col, (0, 0, 0, dummy_col), value=float("-inf")).permute(0, 2, 1)
-            global_row_emb = self.maxpool(out_emb_row).squeeze(-1)
-            global_col_emb = self.maxpool(out_emb_col).squeeze(-1)
-            k_row_logit = self.final_row(global_row_emb).squeeze(-1)
-            k_col_logit = self.final_col(global_col_emb).squeeze(-1)
-            if self.mean_k:
-                k_logits = (k_row_logit + k_col_logit) / 2
+                    device=match_scores.device,
+                )
+            no_pair_mask = None
+            if self.training:
+                if "label" in data_dict:
+                    labels = data_dict["label"].to(match_scores.device).view(-1).long()
+                    imposter_mask = labels == 0
+                    if imposter_mask.any():
+                        gt_ks = gt_ks.clone()
+                        gt_ks[imposter_mask] = 0.0
+                    no_pair_mask = imposter_mask | (gt_ks == 0)
+                else:
+                    no_pair_mask = gt_ks == 0
+
+            if self.regression:
+                dummy_row = self.univ_size - ss_base.shape[1]
+                dummy_col = self.univ_size - ss_base.shape[2]
+                if dummy_row < 0 or dummy_col < 0:
+                    raise ValueError(
+                        f"AFAU univ_size={self.univ_size} is smaller than sinkhorn score size "
+                        f"({ss_base.shape[1]}, {ss_base.shape[2]})"
+                    )
+                max_n1_k = int(torch.max(nrows).item()) if nrows.numel() > 0 else 0
+                max_n2_k = int(torch.max(ncols).item()) if ncols.numel() > 0 else 0
+                # init_row_emb = torch.zeros(
+                #     (batch_size, max_n1_k, self.univ_size),
+                #     dtype=torch.float32,
+                #     device=ss_base.device,
+                # )
+                # init_col_emb = torch.zeros(
+                #     (batch_size, max_n2_k, self.univ_size),
+                #     dtype=torch.float32,
+                #     device=ss_base.device,
+                # )
+
+                src_desc = graph_node_descs[idx1][:, :max_n1_k, :]
+                tgt_desc = graph_node_descs[idx2][:, :max_n2_k, :]
+
+                init_row_emb = self.k_row_init(src_desc)
+                init_col_emb = self.k_col_init(tgt_desc)
+
+                if self.training: 
+                    data_dict["src_embeddings"] = src_desc.detach()
+                    data_dict["tgt_embeddings"] = tgt_desc.detach()
+
+                    
+                for b in range(batch_size):
+                    n2_b = int(ncols[b].item())
+                    if n2_b <= 0:
+                        continue
+                    # index = torch.arange(n2_b, dtype=torch.long, device=ss_base.device).unsqueeze(1)
+                    # init_col_emb_one = torch.zeros(
+                    #     max_n2_k,
+                    #     self.univ_size,
+                    #     dtype=torch.float32,
+                    #     device=ss_base.device,
+                    # ).scatter_(1, index, 1)
+                    # init_col_emb[b] = init_col_emb_one
+                out_emb_row, out_emb_col = self.encoder_k(init_row_emb, init_col_emb, ss_base.detach())
+                out_emb_row = F.pad(out_emb_row, (0, 0, 0, dummy_row), value=float("-inf")).permute(0, 2, 1)
+                out_emb_col = F.pad(out_emb_col, (0, 0, 0, dummy_col), value=float("-inf")).permute(0, 2, 1)
+                global_row_emb = self.maxpool(out_emb_row).squeeze(-1)
+                global_col_emb = self.maxpool(out_emb_col).squeeze(-1)
+                k_row_logit = self.final_row(global_row_emb).squeeze(-1)
+                k_col_logit = self.final_col(global_col_emb).squeeze(-1)
+                if self.mean_k:
+                    k_logits = (k_row_logit + k_col_logit) / 2
+                else:
+                    k_logits = k_row_logit
+                ks = torch.sigmoid(k_logits)
+                # ks = torch.relu(k_logits)
             else:
-                k_logits = k_row_logit
-            ks = torch.sigmoid(k_logits)
-            # ks = torch.relu(k_logits)
-        else:
-            ks = gt_ks / min_point_tensor
-            # ks = gt_ks
+                ks = gt_ks / min_point_tensor
+                # ks = gt_ks
 
-        # ----- K Match Count Selection -----
-        predicted_match_count = torch.nan_to_num(
-            ks.view(-1) * min_point_tensor,
-            # ks.view(-1),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
 
-        selected_match_count = _compute_k_match_count(
-            predicted_match_count,
-            gt_ks,
-            min_point_tensor,
-            training=bool(self.training),
-            train_use_pred_k=bool(self.train_use_pred_k),
-            no_pair_mask=no_pair_mask if self.training else None,
-        )
-        if stage1_mode:
-            # Stage 1 forces GT-k as the selected match count.
-            selected_match_count = torch.clamp(gt_ks, min=0.0)
+
+            # ----- Transport Matrices and no match probability -----
+            # transport_with_dustbin keeps the extra row/col;
+            transport_with_dustbin = match_scores.new_zeros(batch_size, max_n1 + 1, max_n2 + 1)
+            no_match_prob = match_scores.new_zeros(batch_size)
+            for b in range(batch_size):
+                n1 = int(nrows[b].item())
+                n2 = int(ncols[b].item())
+                if n1 < 0 or n2 < 0:
+                    raise ValueError(f"Negative graph size detected: n1={n1}, n2={n2}")
+                if n1 > max_n1 or n2 > max_n2:
+                    raise ValueError(
+                        f"Requested active size exceeds padded score shape: "
+                        f"n1={n1}, n2={n2}, max_n1={max_n1}, max_n2={max_n2}"
+                    )
+                if n1 == 0 and n2 == 0:
+                    continue
+                transport_with_dustbin[b, : n1 + 1, : n2 + 1] =torch.exp(
+                        log_optimal_transport(
+                            match_scores[b, :n1, :n2] / self.tau,
+                            self.bin_score,
+                            SK_ITER_NUM,
+                        )
+                    )
+                # Mean reject probability for rows and columns.
+                row_reject_mean = transport_with_dustbin[b, :n1, n2].mean()
+                col_reject_mean = transport_with_dustbin[b, n1, :n2].mean()
+                no_match_prob[b] = 0.5 * (row_reject_mean + col_reject_mean)
+
+            no_match_prob = torch.clamp(no_match_prob, 0.0, 1.0)
+            no_match_keep = 1.0 - no_match_prob
+
+            # ----- K Match Count Selection (gated by no-match) -----
+            predicted_match_count_raw = ks.view(-1) * min_point_tensor
+            predicted_match_count = (no_match_keep.detach()) * predicted_match_count_raw
+
+            if self.training:
+                selected_match_count = torch.clamp(gt_ks, min=0.0)
+            else:
+                selected_match_count = torch.round(predicted_match_count)
+
             selected_match_count = torch.minimum(selected_match_count, min_point_tensor)
 
-        # ----- Transport Matrices (Dustbin + Real Block) -----
-        # transport_with_dustbin keeps the extra row/col; transport_real_block excludes them.
-        transport_with_dustbin = match_scores.new_zeros(batch_size, max_n1_transport + 1, max_n2_transport + 1)
-        transport_real_block = match_scores.new_zeros(batch_size, max_n1_transport, max_n2_transport)
-        for b in range(batch_size):
-            n1 = int(nrows[b].item())
-            n2 = int(ncols[b].item())
-            if n1 < 0 or n2 < 0:
-                raise ValueError(f"Negative graph size detected: n1={n1}, n2={n2}")
-            if n1 > max_n1_transport or n2 > max_n2_transport:
-                raise ValueError(
-                    f"Requested active size exceeds padded score shape: "
-                    f"n1={n1}, n2={n2}, max_n1={max_n1_transport}, max_n2={max_n2_transport}"
-                )
-            if n1 == 0 and n2 == 0:
-                continue
-            sample_logits_real_block = match_scores[b, :n1, :n2]
-            log_transport = log_optimal_transport(sample_logits_real_block / self.tau, self.bin_score, SK_ITER_NUM)
-            sample_transport_with_dustbin = torch.exp(log_transport)
-            sample_transport_with_dustbin = torch.nan_to_num(
-                sample_transport_with_dustbin,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            transport_with_dustbin[b, : n1 + 1, : n2 + 1] = sample_transport_with_dustbin
-            if n1 > 0 and n2 > 0:
-                transport_real_block[b, :n1, :n2] = sample_transport_with_dustbin[:n1, :n2]
-                dustbin_col = transport_with_dustbin[b, :n1, -1]   # (n1,)
-                dustbin_row = transport_with_dustbin[b, -1, :n2]   # (n2,)
+            if stage == 1:
+                # Stage 1 forces GT-k as the selected match count.
+                selected_match_count = torch.clamp(gt_ks, min=0.0)
+                selected_match_count = torch.minimum(selected_match_count, min_point_tensor)
 
-                mask = (
-                    transport_with_dustbin[b, :n1, :n2] < dustbin_col[:, None]
-                ) & (
-                    transport_with_dustbin[b, :n1, :n2] < dustbin_row[None, :]
-                )
-                transport_real_block[b, :n1, :n2][mask] = 0.0
 
-        dustbin_k_pred_count, dustbin_k_rows_count, dustbin_k_cols_count = _dustbin_soft_k_from_transport(
-            transport_with_dustbin,
-            nrows,
-            ncols,
-        )
-        if dustbin_k_pred_count.numel() > 0:
-            dustbin_k_balance_err = torch.mean(torch.abs(dustbin_k_rows_count - dustbin_k_cols_count))
-        else:
-            dustbin_k_balance_err = match_scores.new_tensor(0.0)
-
-        # ----- Top-k Refinement Path -----
-        if (bool(self.regression) and (not only_dustbin)) or stage1_mode:
+            # ----- Top-k Refinement Path -----
+            
             topk_match_count = selected_match_count.view(-1)
-            _, topk_selection_prob = soft_topk(
+            _, topk_refined_transport = soft_topk(
                 ss_base,
                 topk_match_count,
                 SK_ITER_NUM,
@@ -650,151 +553,92 @@ class Net(CNN):
                 n_points[idx2],
                 return_prob=True,
             )
-            topk_refined_transport = topk_selection_prob 
-            topk_refined_transport = torch.nan_to_num(topk_refined_transport, nan=0.0, posinf=0.0, neginf=0.0)
-        else:
-            topk_refined_transport = transport_real_block.clone()
-            topk_refined_transport = torch.nan_to_num(topk_refined_transport, nan=0.0, posinf=0.0, neginf=0.0)
+          
 
 
+            if stage >= 3 or stage is None:
+                # ----- Soft Dustbin Gate for Top-k -----
+                # Same shape as topk_refined_transport: [B, max_n1, max_n2]
+                dustbin_soft_gate = topk_refined_transport.new_ones(topk_refined_transport.shape)
 
-        # ----- DS Matrix Assembly -----  
-        ds_mat = transport_with_dustbin.clone()
-        ds_mat[:, : topk_refined_transport.shape[1], : topk_refined_transport.shape[2]] = topk_refined_transport
+                for b in range(topk_refined_transport.shape[0]):
+                    n1 = int(nrows[b].item())
+                    n2 = int(ncols[b].item())
+                    if n1 <= 0 or n2 <= 0:
+                        continue
 
-        # ----- Top-k Permutation Proposal -----
-        perm_topk_match_count = selected_match_count
-        hungarian_seed_perm = hungarian(topk_refined_transport, n_points[idx1], n_points[idx2])
-        top_indices = torch.argsort(
-            hungarian_seed_perm.mul(topk_refined_transport).reshape(hungarian_seed_perm.shape[0], -1),
-            descending=True,
-            dim=-1,
-        )
-        topk_permutation = torch.zeros_like(topk_refined_transport)
-        topk_permutation = greedy_perm(topk_permutation, top_indices, perm_topk_match_count)
+                    # Reject probs from explicit dustbin transport
+                    row_reject = transport_with_dustbin[b, :n1, n2].clamp(0.0, 1.0)  # P(row -> dustbin)
+                    col_reject = transport_with_dustbin[b, n1, :n2].clamp(0.0, 1.0)  # P(col -> dustbin)
+
+                    # Keep probs
+                    row_keep = 1.0 - row_reject
+                    col_keep = 1.0 - col_reject
+
+                    # Outer product gate
+                    gate = row_keep.unsqueeze(1) * col_keep.unsqueeze(0)
+                    dustbin_soft_gate[b, :n1, :n2] = gate
+
+                # Soft gated top-k (differentiable)
+                topk_gated_soft = topk_refined_transport * dustbin_soft_gate
+
+                # Publish the same score field used to build the final permutation so
+                # downstream consumers of ds_mat see scores consistent with perm_mat.
+                ds_mat = transport_with_dustbin.clone()
+                ds_mat[:, : topk_gated_soft.shape[1], : topk_gated_soft.shape[2]] = topk_gated_soft
+            else:
+                ds_mat = topk_refined_transport
+                topk_gated_soft = topk_refined_transport
+
+            # ----- Top-k Permutation Proposal -----
+            perm_topk_match_count = selected_match_count
+            hungarian_seed_perm = hungarian(topk_gated_soft, n_points[idx1], n_points[idx2])
+            top_indices = torch.argsort(
+                hungarian_seed_perm.mul(topk_gated_soft).reshape(hungarian_seed_perm.shape[0], -1),
+                descending=True,
+                dim=-1,
+            )
+        
+            perm_mat = torch.zeros_like(topk_refined_transport)
+            perm_mat = greedy_perm(perm_mat, top_indices, perm_topk_match_count)
+
+
+            # ----- Final Composition -----
+            supervised_ks = torch.where(
+                min_point_tensor > 0,
+                gt_ks / min_point_tensor,
+                torch.zeros_like(gt_ks),
+            )
+            if no_pair_mask is not None:
+                supervised_ks = torch.where(no_pair_mask, torch.zeros_like(supervised_ks), supervised_ks)
 
         
-        # if not self.training:
-        #     mask = ss_base < 0.3
-        #     topk_permutation[mask] = 0
+            
+            if bool(self.regression) and k_trainable:
+                ks_loss = F.mse_loss(ks, supervised_ks) * self.k_factor
+                # ks_loss = F.mse_loss(ks, gt_ks) * self.k_factor
+                ks_error = F.l1_loss(ks * min_point_tensor, gt_ks)
+                # ks_error = F.l1_loss(ks, gt_ks)
+                ks_loss = ks_loss
+            else:
+                ks_loss = ks.new_tensor(0.0)
+                ks_error = ks.new_tensor(0.0)
 
-        # ----- Dustbin Rejection/Gating Proposal -----
-        dustbin_gated_permutation = torch.zeros_like(transport_real_block)
-        reject_rows = []
-        reject_cols = []
-        dustbin_reject_enable = bool(getattr(self, "dustbin_reject_enable", False))
-        margin = transport_with_dustbin.new_tensor(float(getattr(self, "dustbin_reject_margin", 0.0)))
-        for b in range(transport_real_block.shape[0]):
-            n1 = int(n_points[idx1][b].item())
-            n2 = int(n_points[idx2][b].item())
-            reject_row_mask = transport_with_dustbin.new_zeros((n1,), dtype=torch.bool)
-            reject_col_mask = transport_with_dustbin.new_zeros((n2,), dtype=torch.bool)
 
-            if dustbin_reject_enable and n1 > 0 and n2 > 0:
-                sample_transport_full = transport_with_dustbin[b]
-                sample_transport_real = transport_real_block[b, :n1, :n2]
-                row_best_real_prob = sample_transport_real.max(dim=1).values
-                col_best_real_prob = sample_transport_real.max(dim=0).values
-                row_dustbin_prob = sample_transport_full[:n1, n2]
-                col_dustbin_prob = sample_transport_full[n1, :n2]
-                reject_row_mask = row_dustbin_prob >= (row_best_real_prob + margin)
-                reject_col_mask = col_dustbin_prob >= (col_best_real_prob + margin)
-
-            kept_row_indices = (~reject_row_mask).nonzero(as_tuple=False).view(-1)
-            kept_col_indices = (~reject_col_mask).nonzero(as_tuple=False).view(-1)
-            if n1 > 0 and n2 > 0 and kept_row_indices.numel() > 0 and kept_col_indices.numel() > 0:
-                kept_submatrix = transport_real_block[b, :n1, :n2].index_select(0, kept_row_indices).index_select(
-                    1, kept_col_indices
-                )
-                kept_submatrix_perm = hungarian(kept_submatrix)
-                nz = kept_submatrix_perm.nonzero(as_tuple=False)
-                if nz.numel() > 0:
-                    rr = kept_row_indices[nz[:, 0]]
-                    cc = kept_col_indices[nz[:, 1]]
-                    dustbin_gated_permutation[b, rr, cc] = 1.0
-
-            reject_rows.append(reject_row_mask)
-            reject_cols.append(reject_col_mask)
-
-        # ----- Stage/Mode Overrides and Final Composition -----
-        if stage1_mode:
-            # Stage 1 uses top-k-only permutation output by neutralizing dustbin gating.
-            dustbin_gated_permutation = torch.ones_like(topk_permutation)
-            reject_rows = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx1]]
-            reject_cols = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx2]]
-        if only_k:
-            dustbin_gated_permutation = torch.ones_like(topk_permutation)
-            reject_rows = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx1]]
-            reject_cols = [transport_with_dustbin.new_zeros((int(n.item()),), dtype=torch.bool) for n in n_points[idx2]]
-        if only_dustbin:
-            topk_permutation = torch.ones_like(dustbin_gated_permutation)
-
-        perm_mat = topk_permutation * dustbin_gated_permutation
-
-        supervised_ks = torch.where(
-            min_point_tensor > 0,
-            gt_ks / min_point_tensor_safe,
-            torch.zeros_like(gt_ks),
-        )
-        if no_pair_mask is not None:
-            supervised_ks = torch.where(no_pair_mask, torch.zeros_like(supervised_ks), supervised_ks)
-
-    
-        
-        if bool(self.regression) and k_trainable:
-            ks_loss = F.mse_loss(ks, supervised_ks) * self.k_factor
-            # ks_loss = F.mse_loss(ks, gt_ks) * self.k_factor
-            ks_error = F.l1_loss(ks * min_point_tensor, gt_ks)
-            # ks_error = F.l1_loss(ks, gt_ks)
-            ks_loss = ks_loss + 0.0001 * ks_error
-        else:
-            ks_loss = ks.new_tensor(0.0)
-            ks_error = ks.new_tensor(0.0)
-
-        if dustbin_trainable and data_dict.get("gt_perm_mat") is not None:
-            dustbin_k_mse_loss = F.mse_loss(dustbin_k_pred_count, gt_ks)
-            dustbin_k_mae = F.l1_loss(dustbin_k_pred_count, gt_ks)
-            dustbin_bce_loss = _dustbin_supervision_loss(
-                transport_with_dustbin,
-                data_dict["gt_perm_mat"],
-                n_points[idx1],
-                n_points[idx2],
-            )
-            dustbin_loss = (
-                (self.dustbin_k_mse_weight * dustbin_k_mse_loss)
-                + (self.dustbin_loss_weight * dustbin_bce_loss)
-            )
-        else:
-            dustbin_k_mse_loss = ks.new_tensor(0.0)
-            dustbin_k_mae = ks.new_tensor(0.0)
-            dustbin_bce_loss = ks.new_tensor(0.0)
-            dustbin_loss = ks.new_tensor(0.0)
 
         # print(ks_error * 0.0001)
 
         data_dict.update(
             {   
-                "ds_mat_topk": topk_refined_transport,
-                "ds_mat_dustbin": transport_real_block,
-                "ds_mat_matcher": ds_mat_matcher,
+                "ds_mat_dustbin": transport_with_dustbin,
                 "ds_mat": ds_mat,
                 "perm_mat": perm_mat,
-                "perm_mat_topk": topk_permutation,
-                "perm_mat_dustbin": dustbin_gated_permutation,
                 "ks_loss": ks_loss,
                 "ks_error": ks_error,
-                "dustbin_loss": dustbin_loss,
-                "dustbin_k_mse_loss": dustbin_k_mse_loss,
-                "dustbin_k_mae": dustbin_k_mae,
-                "dustbin_bce_loss": dustbin_bce_loss,
-                "dustbin_k_balance_err": dustbin_k_balance_err,
                 "gt_ks": gt_ks,
-                "k_pred_count": predicted_match_count,
-                "k_match_count": selected_match_count,
+                "k_pred_count": predicted_match_count.detach(),
+                "k_match_count": selected_match_count.detach(),
                 "k_prob": ks,
-                "dustbin_k_pred_count": dustbin_k_pred_count,
-                "rejected_rows": reject_rows,
-                "rejected_cols": reject_cols,
                 "ns": [n_points[idx1] + 1, n_points[idx2] + 1],
                 "has_dustbin": True,
             }

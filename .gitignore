@@ -186,3 +186,8 @@ logs/*
 events.*
 *.txt
 test*
+
+result*/
+config*/
+dataset/Poly2/
+dataset/Poly2/

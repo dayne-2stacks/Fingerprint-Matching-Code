@@ -212,7 +212,11 @@ class KeypointsForMultiSessionMixin:
     Mixin to handle datasets where the same subject may have multiple sessions/images,
     and keypoints need to be unified across those sessions.
     """
-    def _get_anno_by_subject(self, anno_path):
+    def __init__(self, *args, annotation_path, **kwargs):
+        self.annotation_path = Path(annotation_path)
+        super().__init__(*args, **kwargs)
+
+    def _get_anno_by_subject(self, anno_path: Path):
         subject_dict = {}
         with open(anno_path, 'r') as f:
             for line in f:
@@ -225,36 +229,44 @@ class KeypointsForMultiSessionMixin:
                     subject_dict[subject] = [anno]
 
         return subject_dict
-    
 
-    def _get_keypoints(self, img_path):
-        image = img_path.stem
-        keypoints = []
-        base = img_path.parents[3]
-        anno_path = base / "polyU" /"annotations"
-
-    
+    def _get_keypoint_data(self):
+        anno_path = self.annotation_path
         try:
-            mtime = os.path.getmtime(anno_path)
+            mtime = anno_path.stat().st_mtime
         except OSError:
             mtime = None
+
         cache_key = (str(anno_path), mtime)
         cached = self._kpt_cache.get(cache_key)
         if cached is None:
             subject_dict = self._get_anno_by_subject(anno_path)
             cached = subject_pore_labels(subject_dict)
+            self._kpt_cache.clear()
             self._kpt_cache[cache_key] = cached
+        return cached
 
-        global_label, kp_desc, kps = cached
+    def _build_keypoint_image_name(self, img_path: Path):
+        return img_path.stem
 
-        for kp in kps[image]:
-            desc = kp_desc[image]
+    def _build_keypoints(self, image_name, global_label, kp_desc, kps):
+        keypoints = []
+        desc = kp_desc.get(image_name)
+        if desc is None:
+            return keypoints
+
+        for kp in kps.get(image_name, ()):
             label = desc.get_keypoint(kp)
-            if global_label.get(label) is not None: 
+            if global_label.get(label) is not None:
                 label = global_label[label]
             keypoints.append({"labels": label, "x": kp[0], "y": kp[1]})
 
         return keypoints
+
+    def _get_keypoints(self, img_path):
+        image = self._build_keypoint_image_name(img_path)
+        global_label, kp_desc, kps = self._get_keypoint_data()
+        return self._build_keypoints(image, global_label, kp_desc, kps)
 
 class KeypointsFromAnnotationMixin:
     def _get_keypoints(self, img_path):
@@ -365,7 +377,12 @@ class FolderStemIdMixin:
         """ Ids are the entire file name and folder path since there is only one instance per subject """
         folder = img_path.parent.name
         file_stem = img_path.stem
-        unique_id = f"{folder}_{file_stem}"
+        parts = file_stem.split('_')
+        if len(parts) >= 2:
+            cls_name = f"{parts[0]}"
+        else:
+            cls_name = file_stem
+        unique_id = f"{folder}_{cls_name}"
         cls_name = unique_id
         return unique_id, cls_name
 
@@ -409,11 +426,21 @@ class PolyUDBII(
     BaseFingerprintDataset,
 ):
     def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/PolyU/DBII',
-                 test_root=None, val_root=None, cache_path='cache', task='match'):
+                 test_root=None, val_root=None, cache_path='cache', task='match',
+                 annotation_path='dataset/polyU/annotations'):
         self.output_dir = Path("data/PolyU-DBII")
         if not os.path.exists(train_root):
             train_test_split(train_root, img_path='dataset/polyU/DBII')
-        super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
+        super().__init__(
+            sets,
+            obj_resize,
+            train_root,
+            test_root,
+            val_root,
+            cache_path,
+            task,
+            annotation_path=annotation_path,
+        )
 
 
 class PolyUDBI(PolyUDBII):
@@ -427,16 +454,50 @@ class PolyUDBI(PolyUDBII):
         super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
         
 class L3SF(
-    StemPartsIdMixin,
-    RootDirTrainTestValMixin,
-    KeypointsFromAnnotationMixin,
+    FolderStemIdMixin,
+    FolderFieldMixin,
+    RootDirByRFolderMixin,
+    KeypointsForMultiSessionMixin,
     BaseFingerprintDataset,
 ):
-    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/L3-SF',
-                 test_root=None, val_root=None, cache_path='cache', task='match'):
+    def __init__(self, sets, obj_resize=RESCALE, train_root='dataset/L3SF_V2/L3-SF',
+                 test_root=None, val_root=None, cache_path='cache', task='match',
+                 annotation_path='dataset/L3SF_V2/results/alignment_annotations.jsonl'):
         self.output_dir = Path("data/L3-SF")
-        super().__init__(sets, obj_resize, train_root, test_root, val_root, cache_path, task)
-        
+        super().__init__(
+            sets,
+            obj_resize,
+            train_root,
+            test_root,
+            val_root,
+            cache_path,
+            task,
+            annotation_path=annotation_path,
+        )
+
+    def _collect_images(self, root_dirs):
+        images = []
+        for dir_path in root_dirs:
+            if not dir_path.exists():
+                print(f"Directory {dir_path} does not exist; skipping it.")
+                continue
+            for ext in ("*.jpg", "*.png"):
+                images.extend(dir_path.glob(ext))
+        return images
+
+    def _build_keypoint_image_name(self, img_path: Path):
+        return f"{img_path.parent.name}_{img_path.stem}"
+
+    def _get_ids(self, img_path: Path):
+        folder = img_path.parent.name
+        file_stem = img_path.stem
+        parts = file_stem.split('_')
+        person = parts[0] if parts else file_stem
+        unique_id = f"{folder}_{file_stem}"
+        cls_name = f"{folder}_{person}"
+        return unique_id, cls_name
+
+
 if __name__ == "__main__":
     # For training, images (and their corresponding csv files) are assumed to be in /green/data/L3SF in folders R1–R5.
     dataset_train = PolyUDBII(

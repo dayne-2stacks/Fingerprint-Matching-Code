@@ -39,7 +39,6 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList([
             EncoderLayer(**self.model_params),
             EncoderLayer(**self.model_params),
-            EncoderLayer(**self.model_params),
             ])
 
     def forward(self, row_emb, col_emb, cost_mat):

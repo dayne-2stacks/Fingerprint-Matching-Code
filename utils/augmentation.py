@@ -43,7 +43,11 @@ transforms = [
     "jpeg_compress",        # compression artifacts
 ]
 
-_RESIZE_TO_MODEL = tv_transforms.Resize(RESCALE, interpolation=InterpolationMode.BILINEAR)
+# Keep RESCALE/object resize semantics as (width, height) outside torchvision.
+_RESIZE_TO_MODEL = tv_transforms.Resize(
+    (RESCALE[1], RESCALE[0]),
+    interpolation=InterpolationMode.BILINEAR,
+)
 _CENTER_CROP_TO_MODEL = tv_transforms.CenterCrop(CROPSIZE)
 _RANDOM_AFFINE_APPLY = tv_transforms.RandomApply(
     [

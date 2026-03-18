@@ -3,6 +3,45 @@ import torch.nn as nn
 from torchvision import models
 
 
+class EfficientNet_base(nn.Module):
+    """
+    Base class that exposes EfficientNet-B0 feature maps:
+      • node_layers – stride-16 feature map  (C=112, H/16, W/16)
+      • edge_layers – stride-32 feature map  (C=1280, H/32, W/32)
+      • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+    """
+    def __init__(self, final_layers=False):
+        super().__init__()
+        self.node_layers, self.edge_layers, self.final_layers = self.get_backbone()
+        if not final_layers:
+            self.final_layers = None
+        self.backbone_params = list(self.parameters())
+
+    def forward(self, *inputs):
+        raise NotImplementedError
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @staticmethod
+    def get_backbone():
+        backbone = models.efficientnet_b4(pretrained=True)
+        node_layers = nn.Sequential(
+            backbone.features[0], backbone.features[1], backbone.features[2], backbone.features[3]
+        )
+        edge_layers = nn.Sequential(
+            backbone.features[4], backbone.features[5], backbone.features[6], backbone.features[7]
+        )
+        final_layers = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)))
+        return node_layers, edge_layers, final_layers
+    
+class EfficientNet(EfficientNet_base):
+    """EfficientNet-B4 with final global-pool layer."""
+    def __init__(self):
+        super().__init__(final_layers=True)
+
+
 class _TorchvisionResNetBase(nn.Module):
     _MODEL_NAME = None
     _WEIGHTS_ENUM_NAME = None
@@ -46,6 +85,7 @@ class _TorchvisionResNetBase(nn.Module):
         edge_layers = nn.Sequential(backbone.layer4)
         final_layers = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)))
         return node_layers, edge_layers, final_layers
+
 
 
 class ResNet34_base(_TorchvisionResNetBase):

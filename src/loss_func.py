@@ -492,3 +492,76 @@ class Distill_QuadraticContrast(torch.nn.Module):
         graph_loss = within_graph_loss + cross_graph_loss
 
         return graph_loss
+
+
+class MultiSimilarityLoss(nn.Module):
+    """
+    Multi-Similarity Loss for embedding-based matching.
+    Pulls together embeddings of matching pairs, pushes apart non-matches.
+    """
+    def __init__(self, alpha=2.0, beta=50.0, margin=0.1):
+        super(MultiSimilarityLoss, self).__init__()
+        self.alpha = alpha      # weight for negative loss
+        self.beta = beta        # weight for positive loss
+        self.margin = margin
+        self.eps = 1e-8
+
+    def forward(self, src_embeddings, tgt_embeddings, gt_perm_mat, src_ns, tgt_ns):
+        """
+        :param src_embeddings: (batch, max_n1, embedding_dim)
+        :param tgt_embeddings: (batch, max_n2, embedding_dim)
+        :param gt_perm_mat: (batch, max_n1, max_n2) ground truth binary matches
+        :param src_ns: actual number of nodes in source
+        :param tgt_ns: actual number of nodes in target
+        """
+        batch_size = src_embeddings.shape[0]
+        device = src_embeddings.device
+        
+        total_loss = torch.tensor(0.0, device=device, dtype=src_embeddings.dtype)
+        count = 0
+        
+        for b in range(batch_size):
+            n1 = int(src_ns[b].item())
+            n2 = int(tgt_ns[b].item())
+            
+            if n1 <= 0 or n2 <= 0:
+                continue
+            
+            src_emb = src_embeddings[b, :n1, :]  # (n1, dim)
+            tgt_emb = tgt_embeddings[b, :n2, :]  # (n2, dim)
+            gt = gt_perm_mat[b, :n1, :n2]        # (n1, n2)
+            
+            # Normalize embeddings
+            src_emb = F.normalize(src_emb, p=2, dim=1)
+            tgt_emb = F.normalize(tgt_emb, p=2, dim=1)
+            
+            # Compute pairwise similarities
+            sim = torch.matmul(src_emb, tgt_emb.t())  # (n1, n2)
+            
+            # Positive pairs (gt == 1)
+            pos_mask = gt == 1
+            # Negative pairs (gt == 0)
+            neg_mask = gt == 0
+            
+            if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+                continue
+            
+            pos_sim = sim[pos_mask]      # positive similarities
+            neg_sim = sim[neg_mask]      # negative similarities
+            
+            # Positive loss: pull positives up
+            pos_loss = torch.clamp(1.0 - pos_sim, min=0.0)
+            pos_loss = pos_loss ** 2
+            
+            # Negative loss: push negatives down
+            neg_loss = torch.clamp(neg_sim + self.margin, min=0.0)
+            neg_loss = neg_loss ** 2
+            
+            loss = self.alpha * neg_loss.mean() + self.beta * pos_loss.mean()
+            total_loss = total_loss + loss
+            count += 1
+        
+        if count == 0:
+            return torch.tensor(0.0, device=device, dtype=src_embeddings.dtype)
+        
+        return total_loss / count

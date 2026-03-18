@@ -27,6 +27,7 @@ def map_keypoints(kp: tuple) -> str:
 def subject_pore_labels( subject_dict):
     
     uf = UnionFind()
+    component_members = {}
     
     global_label = {}
     kp_desc = {}
@@ -60,14 +61,46 @@ def subject_pore_labels( subject_dict):
             # build descriptor that has universal name for each image keypoint
             desc1 = get_keypoint_labels(anno['image1'], 1, anno, kp_desc, kps)
             desc2 = get_keypoint_labels(anno['image2'], 2, anno, kp_desc, kps)
+            seen_img1 = set()
+            seen_img2 = set()
 
-            for match in anno['matches']:
+            for match in sorted(anno['matches'], key=lambda m: m.get('sq_alignment_error', float('inf'))):
                 kp1 = match['img1_point_rc']
                 kp2 = match['img2_point_rc']
-                uf.union(
-                        desc1.get_keypoint(kp1),
-                        desc2.get_keypoint(kp2)
-                        )
+                kp1_key = map_keypoints(kp1)
+                kp2_key = map_keypoints(kp2)
+                if kp1_key in seen_img1 or kp2_key in seen_img2:
+                    continue
+                seen_img1.add(kp1_key)
+                seen_img2.add(kp2_key)
+                node1 = desc1.get_keypoint(kp1)
+                node2 = desc2.get_keypoint(kp2)
+                root1 = uf[node1]
+                root2 = uf[node2]
+
+                members1 = component_members.setdefault(root1, {})
+                members1.setdefault(desc1.image, node1)
+                members2 = component_members.setdefault(root2, {})
+                members2.setdefault(desc2.image, node2)
+
+                if root1 == root2:
+                    continue
+
+                if any(
+                    image in members1 and members1[image] != node
+                    for image, node in members2.items()
+                ):
+                    continue
+
+                uf.union(node1, node2)
+                new_root = uf[node1]
+                merged_members = dict(members1)
+                merged_members.update(members2)
+                component_members[new_root] = merged_members
+                if root1 != new_root:
+                    component_members.pop(root1, None)
+                if root2 != new_root:
+                    component_members.pop(root2, None)
                 
     for k in uf:
         global_label[k] = uf[k]

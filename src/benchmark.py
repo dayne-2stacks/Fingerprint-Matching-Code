@@ -17,7 +17,7 @@ from src.gmdataset import RESCALE
 
 
 PAIRING_TASK = "classify"
-ONLY_GENUINE_PAIRS = False
+
 
 
 def _normalize_filter(filter_value):
@@ -43,7 +43,7 @@ class ClassifyPairs:
         fid = re.sub(r"_aug_\d+$", "", fid)
         return fid
 
-    def _build_classify_pairs(self):
+    def _build_classify_pairs(self, only_genuine=False):
         """Generate genuine and imposter pairs for the classification task."""
         # Prefer the in-memory annotations already loaded by FingerprintBenchmarkBase
         data_dict = getattr(self, "data_dict", None)
@@ -77,7 +77,7 @@ class ClassifyPairs:
             else:
                 genuine_pairs.append((uniq_ids[0], uniq_ids[0]))
 
-        if ONLY_GENUINE_PAIRS:
+        if only_genuine:
             random.shuffle(genuine_pairs)
             return genuine_pairs
 
@@ -118,6 +118,7 @@ class SessionStancePairMixin(ABC):
     def _build_classify_pairs(self):
         """Generate genuine and imposter pairs according to session/stance protocol."""
         # Build compact structures for speed.
+        person_lists = {}
         s1_lists = {}
         s2_lists = {}
         s1_stance1 = {}
@@ -127,6 +128,7 @@ class SessionStancePairMixin(ABC):
             if not parsed_info:
                 continue
             person, session, stance = parsed_info
+            person_lists.setdefault(person, []).append(img_id)
             # If session 1, add to s1 list else s2 list
             if session == 1:
                 s1_lists.setdefault(person, []).append(img_id)
@@ -138,15 +140,23 @@ class SessionStancePairMixin(ABC):
                     s2_stance1[person] = img_id
 
         genuine_pairs = []
-        # Combine Genuine pairs from s1 and s2 lists
-        for person, s1 in s1_lists.items():
-            s2 = s2_lists.get(person)
-            if not s2:
-                continue
-            for id1 in s1:
-                for id2 in s2:
-                    genuine_pairs.append((id1, id2))
-        if ONLY_GENUINE_PAIRS:
+        if self.sets == 'train':
+            for person_ids in person_lists.values():
+                uniq_ids = list(dict.fromkeys(person_ids))
+                if len(uniq_ids) >= 2:
+                    genuine_pairs.extend(itertools.combinations(uniq_ids, 2))
+                elif uniq_ids:
+                    genuine_pairs.append((uniq_ids[0], uniq_ids[0]))
+        else:
+            # Combine Genuine pairs from s1 and s2 lists
+            for person, s1 in s1_lists.items():
+                s2 = s2_lists.get(person)
+                if not s2:
+                    continue
+                for id1 in s1:
+                    for id2 in s2:
+                        genuine_pairs.append((id1, id2))
+        if self.only_genuine   :
             random.shuffle(genuine_pairs)
             return genuine_pairs
 
@@ -210,8 +220,9 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
 
     def __init__(self, sets, obj_resize=RESCALE, problem='2GM',
                  filter=None, task='classify', dataset_cls=L3SFV2AugmentedDataset,
-                 name=None, **args):
+                 name=None, only_genuine=False, **args):
         task = PAIRING_TASK
+        self.only_genuine = only_genuine
         # Instead of a dataset name from a fixed list, we use our new dataset.
         self.name = name if name is not None else getattr(dataset_cls, '__name__', 'CustomDataset')
         self.problem = problem
@@ -234,17 +245,9 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
             json_path = None
 
         self.task = dataset_instance.task
-        # When operating in classification mode, keep the split passed by the
-        # caller rather than forcing the benchmark to "test".  This ensures the
-        # benchmark only references IDs that belong to the selected split.
+
         self.sets = sets
 
-        # Make sure that the dataset has the attributes that Benchmark expects.
-        # For example, Benchmark later uses:
-        #   - dataset_dir: a directory where JSON annotation files are saved.
-        #   - suffix: a string suffix used in the JSON filenames.
-        #   - classes: a list of available object classes.
-        #
         # If your dataset class does not already define these, set them here:
         if not hasattr(dataset_instance, "dataset_dir"):
             # Prefer dataset-specific output_dir if present
@@ -452,7 +455,7 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
         # TODO: modify this compute length to give correct length for classes. However it should also be the length during classification we will no longer be doing a matching task.
         if self.task == 'classify':
             if not hasattr(self, '_classify_pairs'):
-                self._classify_pairs = self._build_classify_pairs()
+                self._classify_pairs = self._build_classify_pairs(only_genuine=self.only_genuine)
             return len(self._classify_pairs)
 
         if cls == None:
@@ -538,17 +541,12 @@ class L3SFBenchmark(SessionStancePairMixin, FingerprintBenchmarkBase):
         )
 
     def _parse_id(self, img_id):
-        """Parse an image identifier into (person, session, stance).
-
-        Expected format: ``{person}_{session}_{stance}`` with integer
-        components. Returns ``(person, session, stance)`` or ``None`` if the
-        pattern does not match.
-        """
+        """Parse ``R<fold>_<person>_<session>_<stance>`` identifiers."""
         parts = img_id.split('_')
-        if len(parts) < 4:
+        if len(parts) != 4:
             return None
         try:
-            person = parts[0] + "_" + parts[1]
+            person = f"{parts[0]}_{parts[1]}"
             session = int(parts[2])
             stance = int(parts[3])
             return person, session, stance

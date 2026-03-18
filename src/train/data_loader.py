@@ -9,6 +9,7 @@ def build_dataloaders(
     benchmark_name: str = "L3SFV2AugmentedBenchmark",
     filter=None,
     overfit_to_train_split: bool = False,
+    stage: int = 4,
 ):
     """Create dataloaders for training, validation and testing.
 
@@ -28,6 +29,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
+        only_genuine=True if stage == 1 else False,
     )
 
     test_bm = BM(
@@ -35,6 +37,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
+        only_genuine=True if stage == 1 else False,
     )
 
     val_bm = BM(
@@ -42,6 +45,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
+        only_genuine=True if stage == 1 else False,
     )
 
     ds_name = {
@@ -50,15 +54,17 @@ def build_dataloaders(
         "PolyUDBIIBenchmark": "PolyUDBII"
     }[benchmark_name]
     
-    # In explicit overfit mode, disable train augmentation and reuse the train split
-    # for val/test to make memorization behavior observable.
-    train_augment = not overfit_to_train_split
-    image_dataset = GMDataset(ds_name, benchmark, dataset_len, True, None, "2GM", augment=train_augment)
-    test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM", augment=False)
-    val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM", augment=False)
+
+    image_dataset = GMDataset(ds_name, benchmark, dataset_len, True, None, "2GM",  augment=True)
+    test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM",  augment=False)
+    val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM",  augment=False)
 
     dataloader = get_dataloader(image_dataset, batch_size=batch_size, shuffle=True, fix_seed=False)
     test_dataloader = get_dataloader(test_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
     val_dataloader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
-
+    
+    
+    
     return dataloader, val_dataloader, test_dataloader
+    # return val_dataloader, val_dataloader, val_dataloader
+
