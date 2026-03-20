@@ -115,6 +115,7 @@ for file in config_files:
     WARMUP_K_EPOCHS = int(stage_cfg["WARMUP_K_EPOCHS"])
 
     REGRESSION = bool(stage_cfg["REGRESSION"])
+    DUSTBIN_REJECT_ENABLE = bool(stage_cfg["DUSTBIN_REJECT_ENABLE"])
     DETECT_ANOMALY = bool(stage_cfg["DETECT_ANOMALY"])
     FOCAL_GAMMA = float(stage_cfg.get("FOCAL_GAMMA", 1.0))
 
@@ -160,6 +161,7 @@ for file in config_files:
         filter=FILTER,
         overfit_to_train_split=OVERFIT_TO_TRAIN_SPLIT,
         stage=stage,
+        has_dustbin=DUSTBIN_REJECT_ENABLE,
     )
     # =====================================================
     # Model, Loss, and Device Setup

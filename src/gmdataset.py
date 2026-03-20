@@ -14,6 +14,7 @@ from src.sparse_torch import CSRMatrix3d, CSCMatrix3d
 import cv2
 from utils.augmentation import augment_image, augment_image_pair, augment_two_images, _standardize_to_model as _standardize
 from itertools import combinations
+from functools import partial
 from src.model.ngm import CROPSIZE, UNIV_SIZE, RESCALE
 
 
@@ -32,8 +33,6 @@ def _pad_perm_mats_with_dustbin(mats, ns_pairs):
 
 
 
-
-RESCALE=RESCALE
 SRC_GRAPH_CONSTRUCT="tri"
 TGT_GRAPH_CONSTRUCT="tri"
 SYM_ADJACENCY=True
@@ -44,52 +43,12 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=145
-DATALOADER_NUM=2
-
-# class GMDataset(Dataset):
-#     def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
-#         # Name of Dataset
-#         self.name = name
-#         # Benchmark Object
-#         self.bm = bm
-#         # Whether to use all graphs
-#         self.using_all_graphs = using_all_graphs
-#         # Object size after resizing
-#         self.obj_size = self.bm.obj_resize
-#         # Determine if in test mode
-#         self.test = True if self.bm.sets == 'test' else False
-#         # Determine if augmentation is to be applied. Always augment during training
-#         if augment is None:
-#             self.augment = self.bm.sets == 'train'
-        
-#         # Class selection
-#         self.classes = self.bm.classes if cls in ['none', 'all'] else [cls]
-
-#         self.problem_type = problem
-
-#         if len(self.classes) > 0:
-#             self.img_num_list = self.bm.compute_img_num(self.classes[0])
-
-#         # All are classification tasks
-#         pairs, total_len = self.bm.get_rand_id_combination()
-
-#         if self.bm.sets == 'test':
-#             # In test mode always use the full set of pairs
-#             self.length = total_len
-#         else:
-#             if length is not None and length < total_len:
-#                 pairs[0] = pairs[0][:length]
-#                 self.length = length
-#             else:
-#                 self.length = total_len
-
-#         self.id_combination = pairs
-#         self.length_list = [self.length]
-        
+DATALOADER_NUM=2  
 
 class GMDataset(Dataset):
-    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None):
+    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None, has_dustbin: bool = True):
         self.name = name
+        self.has_dustbin = has_dustbin
         self.bm = bm
         self.using_all_graphs = using_all_graphs
         self.obj_size = self.bm.obj_resize
@@ -115,21 +74,6 @@ class GMDataset(Dataset):
         # For classification we rely on the genuine/imposter pairs
         pairs, total_len = self.bm.get_rand_id_combination()
 
-        # selected_classes = self.bm.classes[:2]
-        # allowed_ids = set()
-
-        # for cls_name in selected_classes:
-        #     cls_ids = [
-        #         img_id for img_id, anno in self.bm.data_dict.items()
-        #         if anno["cls"] == cls_name
-        #     ][:2]
-        #     allowed_ids.update(cls_ids)
-
-        # pairs[0] = [
-        #     pair for pair in pairs[0]
-        #     if pair[0] in allowed_ids and pair[1] in allowed_ids
-        # ]
-        # total_len = len(pairs[0])
 
         if self.bm.sets == 'test':
             # In test mode always use the full set of pairs
@@ -162,9 +106,10 @@ class GMDataset(Dataset):
         return canonical
 
     @classmethod
-    def _build_perm_mat_from_annos(cls, annos1, annos2):
+    def _build_perm_mat_from_annos(cls, annos1, annos2, has_dustbin: bool = True):
         n1, n2 = len(annos1), len(annos2)
-        perm_mat = np.zeros((n1 + 1, n2 + 1), dtype=np.float32)
+        rows, cols = (n1 + 1, n2 + 1) if has_dustbin else (n1, n2)
+        perm_mat = np.zeros((rows, cols), dtype=np.float32)
 
         label_to_rows = defaultdict(list)
         label_to_cols = defaultdict(list)
@@ -181,26 +126,27 @@ class GMDataset(Dataset):
 
         matched_rows = set()
         matched_cols = set()
-        for label, rows in label_to_rows.items():
-            cols = label_to_cols.get(label)
-            if not cols:
+        for label, row_list in label_to_rows.items():
+            col_list = label_to_cols.get(label)
+            if not col_list:
                 continue
-            if len(rows) != 1 or len(cols) != 1:
+            if len(row_list) != 1 or len(col_list) != 1:
                 continue
-            i = rows[0]
-            j = cols[0]
+            i = row_list[0]
+            j = col_list[0]
             perm_mat[i, j] = 1.0
             matched_rows.add(i)
             matched_cols.add(j)
 
-        if n1 > 0:
-            unmatched_rows = [i for i in range(n1) if i not in matched_rows]
-            if unmatched_rows:
-                perm_mat[unmatched_rows, n2] = 1.0
-        if n2 > 0:
-            unmatched_cols = [j for j in range(n2) if j not in matched_cols]
-            if unmatched_cols:
-                perm_mat[n1, unmatched_cols] = 1.0
+        if has_dustbin:
+            if n1 > 0:
+                unmatched_rows = [i for i in range(n1) if i not in matched_rows]
+                if unmatched_rows:
+                    perm_mat[unmatched_rows, n2] = 1.0
+            if n2 > 0:
+                unmatched_cols = [j for j in range(n2) if j not in matched_cols]
+                if unmatched_cols:
+                    perm_mat[n1, unmatched_cols] = 1.0
 
         return perm_mat, len(matched_rows)
 
@@ -302,7 +248,7 @@ class GMDataset(Dataset):
             annos2_base,
             clip_to_univ=True,
         )
-        perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered)
+        perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered, self.has_dustbin)
 
         # Genuine pairs should carry valid positive correspondences. If random
         # augmentation removes all overlap, fall back to a same-image dual view.
@@ -312,7 +258,7 @@ class GMDataset(Dataset):
                 annos1_base,
                 clip_to_univ=True,
             )
-            perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered)
+            perm_mat, n_common = self._build_perm_mat_from_annos(annos1_filtered, annos2_filtered, self.has_dustbin)
 
         
 
@@ -356,7 +302,7 @@ class GMDataset(Dataset):
             'pyg_graphs': [pyg_graph1, pyg_graph2],
             'cls': [str(x) for x in cls],
             'id_list': id_list,
-            'univ_size': torch.tensor(n_common),
+            'n_common': torch.tensor(n_common),
             'images': imgs,
             'label': torch.tensor(label, dtype=torch.float32)
         }
@@ -399,7 +345,7 @@ class QAPDataset(Dataset):
         return ret_dict
 
 
-def collate_fn(data: list):
+def collate_fn(data: list, has_dustbin: bool = True):
     """
     Create mini-batch data for training.
     """
@@ -423,15 +369,7 @@ def collate_fn(data: list):
                 for k in ks:
                     assert k == ks[0], "Keys mismatch."
                 k = ks[0]
-                if k == 'gt_perm_mat' and ns_pairs is not None:
-                    has_dustbin = True
-                    has_dustbin = False
-                    for mat, (n1, n2) in zip(vs, ns_pairs):
-                        shape = mat.shape
-                        if shape[0] != n1 + 1 or shape[1] != n2 + 1:
-                            has_dustbin = False
-                            break
-                    if has_dustbin:
+                if k == 'gt_perm_mat' and ns_pairs is not None and has_dustbin:
                         padded, mask = _pad_perm_mats_with_dustbin(vs, ns_pairs)
                         ret[k] = padded
                         ret['gt_perm_mat_mask'] = mask
@@ -460,34 +398,14 @@ def collate_fn(data: list):
                 sparse_dtype = np.float16
             else:
                 sparse_dtype = np.float32
-            if G1.shape[0] > 1:
-                KGHs_sparse = []
-                for b in range(G1.shape[0]):
-                    K1G = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in
-                           zip(G2[b].unsqueeze(0), G1[b].unsqueeze(0))]  # 1 as source graph, 2 as target graph
-                    K1H = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(H2[b].unsqueeze(0), H1[b].unsqueeze(0))]
 
-                    # if 'NGM' in cfg and NGM.SPARSE_MODEL:
-                    K1G_sparse = CSCMatrix3d(K1G)
-                    K1H_sparse = CSCMatrix3d(K1H).transpose()
-                    KGHs_sparse.append((K1G_sparse.indices, K1H_sparse.indices))
-                ret['KGHs_sparse'] = KGHs_sparse
-            else:
-                K1G = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(G2, G1)]  # 1 as source graph, 2 as target graph
-                K1H = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(H2, H1)]
-
-                # if 'NGM' in cfg and NGM.SPARSE_MODEL:
-                K1G_sparse = CSCMatrix3d(K1G)
-                K1H_sparse = CSCMatrix3d(K1H).transpose()
-                ret['KGHs_sparse'] = [(K1G_sparse.indices, K1H_sparse.indices)]
-            # else:
-            K1G = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in
-                   zip(G2, G1)]  # 1 as source graph, 2 as target graph
+            K1G = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(G2, G1)]
             K1H = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(H2, H1)]
+            ret['KGHs'] = CSRMatrix3d(K1G), CSCMatrix3d(K1H).transpose()
 
-            K1G = CSRMatrix3d(K1G)
-            K1H = CSRMatrix3d(K1H).transpose()
-            ret['KGHs'] = K1G, K1H
+            ret['KGHs_sparse'] = [
+                (CSCMarix3d([kg]).indices, CSCMatrix3d([kh]).indices) for kg, kh in zip(K1G, K1H)
+            ]
         else:
             raise ValueError('Data type not understood.')
         
@@ -498,17 +416,12 @@ def collate_fn(data: list):
         ret['aff_mat'] = aff_mat
 
     ret['batch_size'] = len(data)
-    # For univ_size, if it's a list of scalar tensors, stack them.
-    if isinstance(ret['univ_size'], list):
-        ret['univ_size'] = torch.stack(ret['univ_size'])
+    if isinstance(ret['n_common'], list):
+        ret['n_common'] = torch.stack(ret['n_common'])
     for v in ret.values():
         if isinstance(v, list):
             ret['num_graphs'] = len(v)
             break
-    ret['batch_size'] = len(data)
-    # For univ_size, stack scalar tensors
-    if isinstance(ret['univ_size'], list):
-        ret['univ_size'] = torch.stack(ret['univ_size'])
     return ret
 
 
@@ -529,8 +442,9 @@ def worker_init_rand(worker_id):
     np.random.seed(torch.initial_seed() % 2 ** 32)
 
 
-def get_dataloader(dataset, batch_size, fix_seed=True, shuffle=False):
+def get_dataloader(dataset, batch_size, fix_seed=True, shuffle=False, has_dustbin: bool = True):
     return torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=DATALOADER_NUM, collate_fn=collate_fn,
+        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=DATALOADER_NUM,
+        collate_fn=partial(collate_fn, has_dustbin=has_dustbin),
         pin_memory=False, worker_init_fn=worker_init_fix if fix_seed else worker_init_rand
     )

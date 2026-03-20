@@ -10,6 +10,7 @@ def build_dataloaders(
     filter=None,
     overfit_to_train_split: bool = False,
     stage: int = 4,
+    has_dustbin: bool = True,
 ):
     """Create dataloaders for training, validation and testing.
 
@@ -55,13 +56,13 @@ def build_dataloaders(
     }[benchmark_name]
     
 
-    image_dataset = GMDataset(ds_name, benchmark, dataset_len, True, None, "2GM",  augment=True)
-    test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM",  augment=False)
-    val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM",  augment=False)
+    image_dataset = GMDataset(ds_name, benchmark, dataset_len, True, None, "2GM", augment=True, has_dustbin=has_dustbin)
+    test_dataset = GMDataset(ds_name, test_bm, dataset_len, True, None, "2GM", augment=False, has_dustbin=has_dustbin)
+    val_dataset = GMDataset(ds_name, val_bm, dataset_len, True, None, "2GM", augment=False, has_dustbin=has_dustbin)
 
-    dataloader = get_dataloader(image_dataset, batch_size=batch_size, shuffle=True, fix_seed=False)
-    test_dataloader = get_dataloader(test_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
-    val_dataloader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False, fix_seed=True)
+    dataloader = get_dataloader(image_dataset, batch_size=batch_size, shuffle=True, fix_seed=False, has_dustbin=has_dustbin)
+    test_dataloader = get_dataloader(test_dataset, batch_size=batch_size, shuffle=False, fix_seed=True, has_dustbin=has_dustbin)
+    val_dataloader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False, fix_seed=True, has_dustbin=has_dustbin)
     
     
     

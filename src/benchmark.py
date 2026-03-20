@@ -240,8 +240,10 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
         # Ensure on-disk annotations are prepared
         try:
             json_path = dataset_instance.to_json()
-        except Exception:
-            # Fallback: proceed and let the later open() raise with context
+        except Exception as e:
+            import traceback
+            print(f"[WARNING] to_json() failed: {e}")
+            traceback.print_exc()
             json_path = None
 
         self.task = dataset_instance.task
