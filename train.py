@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import argparse
 import logging
 from pathlib import Path
 import cv2
@@ -43,19 +44,77 @@ from utils.setup import (
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
+def _set_batchnorm_eval(module):
+    """Set BatchNorm layers to eval mode so running stats stay frozen."""
+    if isinstance(module, _BatchNorm):
+        module.eval()
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Train fingerprint matching model")
+    parser.add_argument(
+        "--exp-name", default="",
+        help="Experiment name — namespaces all outputs under runs/<exp-name>/",
+    )
+    parser.add_argument(
+        "--config-dir", default="config2",
+        help="Directory containing stage*.yml files (and optionally settings.yml). Default: config2",
+    )
+    parser.add_argument(
+        "--global-config", default="",
+        help="Path to global settings YAML. Defaults to <config-dir>/settings.yml if present, else settings.yml",
+    )
+    parser.add_argument(
+        "--set", nargs="*", default=[], metavar="KEY=VALUE",
+        help="Override any config value, e.g. --set LR=0.001 BATCH_SIZE=8",
+    )
+    return parser.parse_args()
+
+args = _parse_args()
 start_epoch = float('inf')
 
-STAGE_CONFIG_FILES = ["config2/stage1.yml", "config2/stage2.yml", "config2/stage3.yml", "config2/stage4.yml"]
-# STAGE_CONFIG_FILES = ["stage1.yml"]
-# STAGE_CONFIG_FILES = ["stage2.yml", "stage3.yml"]
-# STAGE_CONFIG_FILES = ["stage4.yml"]
+# Discover stage configs from --config-dir (sorted so stage1 < stage2 < ...)
+_config_dir = Path(args.config_dir)
+STAGE_CONFIG_FILES = sorted(str(p) for p in _config_dir.glob("stage*.yml"))
+if not STAGE_CONFIG_FILES:
+    raise FileNotFoundError(f"No stage*.yml files found in {_config_dir}")
 
-GLOBAL_CONFIG_FILE = "settings.yml"
+# Resolve global config: explicit flag > <config-dir>/settings.yml > settings.yml
+if args.global_config:
+    GLOBAL_CONFIG_FILE = args.global_config
+elif (_config_dir / "settings.yml").exists():
+    GLOBAL_CONFIG_FILE = str(_config_dir / "settings.yml")
+else:
+    GLOBAL_CONFIG_FILE = "settings.yml"
+
+print(f"Config dir:    {_config_dir}")
+print(f"Global config: {GLOBAL_CONFIG_FILE}")
+print(f"Stage configs: {STAGE_CONFIG_FILES}")
 
 
 global_cfg = _load_global_config(GLOBAL_CONFIG_FILE)
 config_files = list(STAGE_CONFIG_FILES)
 stage_configs = {cfg_file: _load_stage_config(cfg_file, global_cfg) for cfg_file in config_files}
+
+# Namespace all outputs under runs/<exp-name>/ when --exp-name is given
+if args.exp_name:
+    exp_root = Path("runs") / args.exp_name
+    for cfg in stage_configs.values():
+        cfg["OUTPUT_PATH"]    = str(exp_root / cfg["OUTPUT_PATH"])
+        cfg["CHECKPOINT_PATH"] = str(exp_root / cfg["CHECKPOINT_PATH"])
+        cfg["LOG_DIR"]        = str(exp_root / cfg["LOG_DIR"])
+
+# Apply --set KEY=VALUE overrides to every stage config
+overrides = {}
+for item in (args.set or []):
+    k, v = item.split("=", 1)
+    overrides[k] = yaml.safe_load(v)  # handles ints, floats, bools
+if overrides:
+    for cfg in stage_configs.values():
+        for k, v in overrides.items():
+            if k in cfg:
+                cfg[k] = v
+
 stage_output_paths = _collect_stage_output_paths(config_files, stage_configs)
 global_defaults_log = {
     "config_file": GLOBAL_CONFIG_FILE,
@@ -166,10 +225,7 @@ for file in config_files:
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
-    model = Net(
-        # regression=REGRESSION,
-
-    )
+    model = Net(has_dustbin=DUSTBIN_REJECT_ENABLE)
 
     criterion = FocalLoss(gamma=FOCAL_GAMMA)
     # criterion = PermutationLoss()
@@ -274,9 +330,9 @@ for file in config_files:
         print("-" * 10)
 
         model.train()
-        # if stage in (1, 2, 3):
-        #     # Stages with partial freezing should keep BN running stats fixed.
-        #     model.apply(_set_batchnorm_eval)
+        if stage in (2, 3):
+            # Backbone is frozen in these stages — keep BN running stats fixed.
+            model.apply(_set_batchnorm_eval)
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
         if optimizer_k is not None:
             print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))

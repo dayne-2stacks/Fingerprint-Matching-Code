@@ -8,15 +8,16 @@ from src.evaluation_metric import matching_classification_metrics, matching_metr
 def compose_total_loss(
     primary_loss,
     ks_loss,
-    ms_loss=None,
+    dustbin_loss=None,
     stage=None,
 ):
+    dustbin_loss = dustbin_loss if dustbin_loss is not None else 0.0
     if stage == 1 or stage == 4:
-        return primary_loss + ks_loss + ms_loss
+        return primary_loss + ks_loss + dustbin_loss
     elif stage == 2:
         return ks_loss
-    elif stage == 3:    
-        return primary_loss
+    elif stage == 3:
+        return primary_loss + dustbin_loss
 
 
 

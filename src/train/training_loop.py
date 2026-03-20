@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from itertools import islice
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import save_model
@@ -10,7 +11,6 @@ from src.train.common import (
     matching_metrics_from_counts,
     summary_scalars,
 )
-from src.loss_func import MultiSimilarityLoss
 
 
 def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
@@ -20,6 +20,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
     epoch_loss_sum = 0.0
     running_ks_loss = 0.0
     running_ks_error = 0.0
+    running_dustbin_loss = 0.0
     epoch_total_loss_sum = 0.0
     metric_tp_sum = 0.0
     metric_tn_sum = 0.0
@@ -65,30 +66,36 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
             #     else:
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
 
-            # Multi-similarity loss on embeddings
-            ms_loss = torch.tensor(0.0, device=device)
-            # if "src_embeddings" in outputs and "tgt_embeddings" in outputs:
-            #     ms_criterion = MultiSimilarityLoss(alpha=2.0, beta=50.0)
-            #     ms_loss = ms_criterion(
-            #         outputs["src_embeddings"],
-            #         outputs["tgt_embeddings"],
-            #         outputs["gt_perm_mat"],
-            #         outputs["ns"][0],
-            #         outputs["ns"][1]
-            #     )
-            
-        
-                
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
 
+            dustbin_loss = torch.tensor(0.0, device=device)
+            ss_db = outputs.get("ds_mat_db")
+            if ss_db is not None:
+                gt_perm = outputs["gt_perm_mat"]
+                n1s, n2s = outputs["ns"]
+                eps = 1e-15
+                n_valid = 0
+                for b in range(ss_db.shape[0]):
+                    n1_b = int(n1s[b])
+                    n2_b = int(n2s[b])
+                    if n1_b == 0 or n2_b == 0:
+                        continue
+                    gt_db_col = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=1)).clamp(0.0, 1.0)
+                    gt_db_row = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=0)).clamp(0.0, 1.0)
+                    pred_db_col = ss_db[b, :n1_b, n2_b].clamp(eps, 1 - eps)
+                    pred_db_row = ss_db[b, n1_b, :n2_b].clamp(eps, 1 - eps)
+                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_col, gt_db_col, reduction='mean')
+                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_row, gt_db_row, reduction='mean')
+                    n_valid += 1
+                if n_valid > 0:
+                    dustbin_loss = dustbin_loss / n_valid
 
             total_loss = compose_total_loss(
                 primary_loss=loss,
                 ks_loss=ks_loss,
-                ms_loss=ms_loss,
+                dustbin_loss=dustbin_loss,
                 stage=stage,
-
             )
 
             if not torch.isfinite(total_loss).all():
@@ -111,6 +118,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
             epoch_total_loss_sum += total_loss_value
             running_ks_loss += ks_loss_value
             running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
+            running_dustbin_loss += dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else dustbin_loss
 
             batch_counts = batch_match_counts(outputs)
             batch_tp = batch_counts["tp"]
@@ -134,28 +142,23 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
             macro_f1 = batch_scalars["macro_f1"]
 
             if iter_num % 5 == 0:
-
-
                 avg_loss = epoch_loss_sum / iter_num
                 avg_ks_loss = running_ks_loss / iter_num
+                avg_dustbin_loss = running_dustbin_loss / iter_num
                 avg_total_loss = epoch_total_loss_sum / iter_num
 
-                if "ks_loss" in outputs and optimizer_k is not None:
-                    log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
-                            f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
-                            f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}, "
-                            f"P: {prec:.4f}, R: {rec:.4f}, F1: {f1:.4f}, "
-                            f"MiF1: {micro_f1:.4f}, MaF1: {macro_f1:.4f}")
-                else:
-                    log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
-                            f"Loss: {avg_loss:.4f}, "
-                            f"Acc: {acc:.4f}, P: {prec:.4f}, R: {rec:.4f}, F1: {f1:.4f}, "
-                            f"MiF1: {micro_f1:.4f}, MaF1: {macro_f1:.4f}")
+                log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
+                        f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
+                        f"db_loss: {avg_dustbin_loss:.4f}, "
+                        f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}, "
+                        f"P: {prec:.4f}, R: {rec:.4f}, F1: {f1:.4f}, "
+                        f"MiF1: {micro_f1:.4f}, MaF1: {macro_f1:.4f}")
                 print(log_msg)
                 logger.info(log_msg)
 
     avg_epoch_loss = epoch_loss_sum / iter_num
     avg_ks_loss = running_ks_loss / iter_num
+    avg_dustbin_loss = running_dustbin_loss / iter_num
     avg_total_loss = epoch_total_loss_sum / iter_num
     epoch_metric_summary = matching_metrics_from_counts(
         torch.tensor(metric_tp_sum, device=device),
@@ -172,7 +175,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
 
 
     log_msg = (f"==> End of Epoch {epoch}, Avg Primary Loss: {avg_epoch_loss:.4f}, "
-            f"Avg KS Loss: {avg_ks_loss:.4f}, "
+            f"Avg KS Loss: {avg_ks_loss:.4f}, Avg Dustbin Loss: {avg_dustbin_loss:.4f}, "
             f"Avg Total Loss: {avg_total_loss:.4f}, Acc: {avg_accuracy:.4f}, "
             f"P: {avg_precision:.4f}, R: {avg_recall:.4f}, F1: {avg_f1:.4f}, "
             f"MiF1: {avg_micro_f1:.4f}, MaF1: {avg_macro_f1:.4f}")

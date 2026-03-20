@@ -10,20 +10,32 @@
 
 set -e
 
+# Usage:
+#   sbatch run.sh <exp-name> [--config-dir <dir>] [--set KEY=VALUE ...]
+# Examples:
+#   sbatch run.sh baseline
+#   sbatch run.sh sweep_lr --config-dir config_sweep --set LR=5e-3
+EXP_NAME="${1:-default}"
+
 echo "Starting job on $(hostname)"
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"
+echo "Experiment:   $EXP_NAME"
 
 # -----------------------------------
 # Paths
 # -----------------------------------
-CONTAINER="/data/hot/dayneguy/fingerprint/env/thinkmatch"
-WORKDIR="/data/hot/dayneguy/fingerprint"
+CONTAINER="/data/dayneguy/fingerprint/env/thinkmatch"
+WORKDIR="/data/dayneguy/fingerprint"
 
-# Ensure we run from project directory
-cd $WORKDIR
+mkdir -p "$WORKDIR/logs"
 
 # -----------------------------------
 # Run training inside container
 # -----------------------------------
-apptainer shell     --nv      --bind /data:/data      --pwd $WORKDIR $CONTAINER 
-# python train.py
+apptainer exec \
+    --nv \
+    --bind /general:/general \
+    --bind /data:/data \
+    --pwd $WORKDIR \
+    $CONTAINER \
+    python train.py --exp-name "$EXP_NAME" "${@:2}"

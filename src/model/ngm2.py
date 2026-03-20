@@ -38,7 +38,7 @@ SK_TAU = 0.01
 SK_EMB = 1
 GNN_FEAT = [16, 16, 16]
 EDGE_EMB = False
-BATCH_SIZE = 8
+BATCH_SIZE = 16
 
 UNIV_SIZE = 600
 SK_ITER_NUM = 25
@@ -63,8 +63,10 @@ def concat_features(embeddings, num_vertices):
 
 
 class Net(CNN):
-    def __init__(self):
+    def __init__(self, has_dustbin: bool = False):
         super(Net, self).__init__()
+        self.has_dustbin = has_dustbin
+        self.bin_score = nn.Parameter(torch.tensor(1.0))
         self.message_pass_node_features = SiameseSConvOnNodes(input_node_dim=NODE_FEATURE_DIM)
         self.build_edge_features_from_node_features = SiameseNodeFeaturesToEdgeFeatures(
             total_num_nodes=self.message_pass_node_features.num_node_features
@@ -261,7 +263,7 @@ class Net(CNN):
 
         quadratic_affs_list = [[0.5 * x for x in quadratic_affs] for quadratic_affs in quadratic_affs_list]
 
-        s_list, mgm_s_list, x_list, mgm_x_list, indices = [], [], [], [], []
+        s_list, mgm_s_list, x_list, mgm_x_list, ss_db_list, indices = [], [], [], [], [], []
 
         for unary_affs, quadratic_affs, (idx1, idx2) in zip(unary_affs_list, quadratic_affs_list, lexico_iter(range(num_graphs))):
             if not self.sparse:
@@ -328,7 +330,20 @@ class Net(CNN):
             v = self.classifier(emb)
             s = v.view(v.shape[0], points[idx2].shape[1], -1).transpose(1, 2)
 
-            ss = self.sinkhorn(s, n_points[idx1], n_points[idx2], dummy_row=True)
+            if self.has_dustbin:
+                s_db = s.new_zeros(batch_size, s.shape[1] + 1, s.shape[2] + 1)
+                s_db[:, :s.shape[1], :s.shape[2]] = s
+                for b in range(batch_size):
+                    n1_b = int(n_points[idx1][b])
+                    n2_b = int(n_points[idx2][b])
+                    s_db[b, :n1_b, n2_b] = self.bin_score
+                    s_db[b, n1_b, :n2_b] = self.bin_score
+                    s_db[b, n1_b, n2_b] = self.bin_score
+                ss_db = self.sinkhorn(s_db, n_points[idx1] + 1, n_points[idx2] + 1, dummy_row=True)
+                ss = ss_db[:, :s.shape[1], :s.shape[2]]
+            else:
+                ss_db = None
+                ss = self.sinkhorn(s, n_points[idx1], n_points[idx2], dummy_row=True)
 
             gt_ks = torch.tensor(
                 [torch.sum(data_dict['gt_perm_mat'][i]) for i in range(data_dict['gt_perm_mat'].shape[0])],
@@ -453,6 +468,7 @@ class Net(CNN):
             x = greedy_perm(x, top_indices, ks.view(-1) * min_point_tensor)
             s_list.append(ss_out)
             x_list.append(x)
+            ss_db_list.append(ss_db)
             indices.append((idx1, idx2))
 
         print("GT KS:", gt_ks)
@@ -460,11 +476,11 @@ class Net(CNN):
         data_dict.update({
             'ds_mat': s_list[0],
             'perm_mat': x_list[0],
+            'ds_mat_db': ss_db_list[0],
             'ks_loss': ks_loss,
             'ks_error': ks_error,
             'gt_ks': gt_ks,
-            "ns": [n_points[idx1], n_points[idx2]]
-            
+            "ns": [n_points[idx1], n_points[idx2]],
         })
 
         return data_dict

@@ -79,7 +79,6 @@ def validate_epoch(
             total_loss = compose_total_loss(
                 loss,
                 ks_loss,
-                ms_loss=torch.tensor(0.0, device=device),
                 stage=stage,
             )
             total_loss_value = float(total_loss.item())
@@ -162,7 +161,7 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
             batch = data_to_cuda(batch)
             if stage is not None:
                 batch["stage_id"] = int(stage)
-            outputs = model(batch, stage=stage)
+            outputs = model(batch, regression=(stage != 1))
             strip_dustbin_from_outputs(outputs)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             batch_counts = batch_match_counts(outputs)

@@ -1,6 +1,6 @@
 train_defaults:
   num_epochs: 1000
-  BATCH_SIZE: 4 
+  BATCH_SIZE: 16
   OVERFIT_TO_TRAIN_SPLIT: false
   # BM_NAME: L3SFBenchmark
   BM_NAME: PolyUDBIIBenchmark
