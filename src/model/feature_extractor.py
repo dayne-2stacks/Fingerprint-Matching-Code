@@ -90,10 +90,13 @@ class _TorchvisionResNetBase(nn.Module):
 
 class ResNet34_base(_TorchvisionResNetBase):
     """
-    Base class that exposes ResNet-18 feature maps exactly like VGG16_base does:
-      • node_layers – stride-16 feature map  (C=256, H/16, W/16)
-      • edge_layers – stride-32 feature map  (C=512, H/32, W/32)
+    Base class that exposes ResNet-34 feature maps:
+      • node_layers – stride-8 feature map   (C=256, H/8,  W/8)  [layer3 dilated]
+      • edge_layers – stride-16 feature map  (C=512, H/16, W/16)
       • final_layers – optional 1×1 global feature (AdaptiveMaxPool)
+
+    layer3 uses dilation=2 (stride replaced by dilation) so the feature map
+    is 2× larger than standard ResNet34, with no extra FLOPs.
     """
     _MODEL_NAME = "resnet34"
     _WEIGHTS_ENUM_NAME = "ResNet34_Weights"
@@ -102,6 +105,27 @@ class ResNet34_base(_TorchvisionResNetBase):
 
     def __init__(self, final_layers: bool = True):
         super().__init__(final_layers=final_layers)
+
+    @classmethod
+    def get_backbone(cls):
+        backbone = cls._build_torchvision_backbone()
+        # Apply dilation to layer3: replace stride-2 with stride-1 + dilation-2.
+        # This doubles the spatial resolution of node features (stride 16 → 8)
+        # without increasing FLOPs.
+        for m in backbone.layer3.modules():
+            if isinstance(m, nn.Conv2d) and m.stride == (2, 2):
+                m.stride = (1, 1)
+                if m.kernel_size == (3, 3):
+                    m.dilation = (2, 2)
+                    m.padding = (2, 2)
+        node_layers = nn.Sequential(
+            backbone.conv1, backbone.bn1, backbone.relu,
+            backbone.maxpool,
+            backbone.layer1, backbone.layer2, backbone.layer3
+        )
+        edge_layers = nn.Sequential(backbone.layer4)
+        final_layers = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)))
+        return node_layers, edge_layers, final_layers
 
 
 class ResNet50_base(_TorchvisionResNetBase):

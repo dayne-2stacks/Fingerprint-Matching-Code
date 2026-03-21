@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from src.model.affinity_layer import InnerProductWithWeightsAffinity
 from src.model.spline_conv import SiameseSConvOnNodes, SiameseNodeFeaturesToEdgeFeatures
-from utils.feature_align import feature_align
+from utils.feature_align import feature_align_roi
 from utils.factorize_graph_matching import construct_aff_mat, construct_sparse_aff_mat
 from utils.pad_tensor import pad_tensor
 from src.model.gnn import GNNLayer, SPGNNLayer, PYGNNLayer
@@ -36,7 +36,7 @@ GNN_LAYER = 3
 # SK_TAU= 0.005
 SK_TAU = 0.01
 SK_EMB = 1
-GNN_FEAT = [16, 16, 16]
+GNN_FEAT = [64, 64, 64]
 EDGE_EMB = False
 BATCH_SIZE = 16
 
@@ -235,8 +235,8 @@ class Net(CNN):
             edges = normalize_over_channels(edges)
 
             # arrange features
-            U = concat_features(feature_align(nodes, p, n_p, self.rescale), n_p)
-            F = concat_features(feature_align(edges, p, n_p, self.rescale), n_p)
+            U = concat_features(feature_align_roi(nodes, p, n_p, self.rescale), n_p)
+            F = concat_features(feature_align_roi(edges, p, n_p, self.rescale), n_p)
             node_features = torch.cat((U, F), dim=1)
             node_feature_list.append(node_features.detach())
             graph.x = node_features

@@ -1,5 +1,69 @@
 import torch
 from torch import Tensor
+from torchvision.ops import roi_align as tv_roi_align
+
+
+def feature_align_roi(raw_feature: Tensor, P: Tensor, ns_t: Tensor, ori_size: tuple,
+                      roi_radius: float = None, output_size: int = 3, device=None) -> Tensor:
+    r"""
+    Extract local ROI-aligned feature patches around each keypoint and max-pool
+    them to a single vector per keypoint.
+
+    Compared with ``feature_align`` (single-point bilinear interpolation), this
+    captures a small neighbourhood around each pore, making descriptors more
+    robust to sub-pixel localisation errors.
+
+    :param raw_feature: :math:`(b\times c \times H \times W)` feature map.
+    :param P: :math:`(b\times n \times 2)` keypoint coordinates in original-image space (x, y).
+    :param ns_t: :math:`(b)` number of valid keypoints per image.
+    :param ori_size: ``(ori_w, ori_h)`` of the original image.
+    :param roi_radius: half-side of the square ROI **in original-image pixels**.
+        Defaults to ``1.5 / spatial_scale`` (≈ 1.5 feature-map cells).
+    :param output_size: spatial size of the ROIAlign output before max-pooling.
+    :param device: output device (defaults to ``raw_feature.device``).
+    :return: :math:`(b\times c \times n\_max)` feature vectors.
+    """
+    if device is None:
+        device = raw_feature.device
+
+    batch_num = raw_feature.shape[0]
+    channel_num = raw_feature.shape[1]
+    feat_h, feat_w = raw_feature.shape[2], raw_feature.shape[3]
+    ori_w, ori_h = ori_size
+
+    spatial_scale = feat_w / ori_w  # same ratio as feature_align uses
+
+    if roi_radius is None:
+        roi_radius = 1.5 / spatial_scale  # ~1.5 feature-map cells in image space
+
+    n_max = P.shape[1]
+    F = torch.zeros(batch_num, channel_num, n_max, dtype=torch.float32, device=device)
+
+    for idx in range(batch_num):
+        n = int(ns_t[idx].item())
+        if n == 0:
+            continue
+        pts = P[idx, :n].to(device)  # (n, 2)  x, y in original-image space
+
+        # Build ROI boxes: [batch_idx, x1, y1, x2, y2]
+        x1 = pts[:, 0] - roi_radius
+        y1 = pts[:, 1] - roi_radius
+        x2 = pts[:, 0] + roi_radius
+        y2 = pts[:, 1] + roi_radius
+        batch_col = torch.full((n, 1), 0, dtype=torch.float32, device=device)
+        boxes = torch.cat([batch_col, x1.unsqueeze(1), y1.unsqueeze(1),
+                           x2.unsqueeze(1), y2.unsqueeze(1)], dim=1)  # (n, 5)
+
+        # roi_align expects a single-image feature map; process per-image
+        feat = raw_feature[idx].unsqueeze(0)  # (1, c, H, W)
+        # Output: (n, c, output_size, output_size)
+        roi_feats = tv_roi_align(feat, boxes, output_size=output_size,
+                                 spatial_scale=spatial_scale, aligned=True)
+        # Max-pool over the spatial output_size × output_size region
+        pooled = roi_feats.amax(dim=(2, 3))  # (n, c)
+        F[idx, :, :n] = pooled.t()  # (c, n)
+
+    return F
 
 
 def feature_align(raw_feature: Tensor, P: Tensor, ns_t: Tensor, ori_size: tuple, device=None) -> Tensor:

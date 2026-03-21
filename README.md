@@ -79,3 +79,5 @@ sbatch runs.sh l3sf_partial --config-dir config-partial
 sbatch runs.sh nll_baseline --config-dir config_nll 
 sbatch runs.sh l3sf_partial_full  --config-dir config-partial
 sbatch runs.sh l3sf_perm --config-dir config_perm
+
+sbatch runs.sh l3sf_larger_model --config-dir config-larger 
