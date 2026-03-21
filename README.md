@@ -72,3 +72,10 @@ docker build -t fingerprint-thinkmatch .
 docker run --gpus all -it \
   --rm \
   fingerprint-thinkmatch
+
+
+sbatch runs.sh l3sf_dustbin --config-dir config
+sbatch runs.sh l3sf_partial --config-dir config-partial 
+sbatch runs.sh nll_baseline --config-dir config_nll 
+sbatch runs.sh l3sf_partial_full  --config-dir config-partial
+sbatch runs.sh l3sf_perm --config-dir config_perm

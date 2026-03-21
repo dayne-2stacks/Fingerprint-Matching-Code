@@ -12,12 +12,14 @@ def compose_total_loss(
     stage=None,
 ):
     dustbin_loss = dustbin_loss if dustbin_loss is not None else 0.0
-    if stage == 1 or stage == 4:
+    if stage == 0 or stage == 1 or stage == 4:
         return primary_loss + ks_loss + dustbin_loss
     elif stage == 2:
         return ks_loss
     elif stage == 3:
         return primary_loss + dustbin_loss
+    else:
+        return primary_loss + ks_loss + dustbin_loss
 
 
 

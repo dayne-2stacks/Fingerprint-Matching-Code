@@ -4,6 +4,8 @@ import torch.optim as optim
 
 def _stage_from_filename(name: str) -> int:
     name = name.lower()
+    if "stage0" in name:
+        return 0
     if "stage1" in name:
         return 1
     if "stage2" in name:
@@ -17,6 +19,8 @@ def _stage_from_filename(name: str) -> int:
 
 def _stage_group_label(stage: int) -> str:
     stage = int(stage)
+    if stage == 0:
+        return "matcher_warmup"
     if stage == 1:
         return "shared_matcher"
     if stage == 2:
@@ -39,6 +43,7 @@ def _load_global_config(cfg_file):
         "train_defaults": raw_cfg.get("train_defaults", {}),
         "policy_defaults": raw_cfg.get("policy_defaults", {}),
         "data_defaults": raw_cfg.get("data_defaults", {}),
+        "model_defaults": raw_cfg.get("model_defaults", {}),
     }
 
 
@@ -101,7 +106,15 @@ def _configure_stage_trainability(model, stage):
     for _, param in model.named_parameters():
         param.requires_grad = False
 
-    if stage == 1:
+    if stage == 0:
+        # Stage 0: warm up matcher only — backbone frozen to preserve ImageNet features
+        # until the GNN produces stable gradients.
+        _set_trainable(groups["matcher"], True)
+        _set_trainable(groups["backbone_node"], False)
+        _set_trainable(groups["backbone_edge"], False)
+        _set_trainable(groups["k_head"], False)
+        _set_trainable(groups["dustbin"], False)
+    elif stage == 1:
         # Stage 1: train shared matcher baseline (matcher + backbone), keep k/dustbin frozen.
         _set_trainable(groups["matcher"], True)
         _set_trainable(groups["backbone_node"], True)
@@ -197,6 +210,7 @@ def _build_optimizers(model, groups, lr, backbone_lr, k_lr):
 
 def _default_pretrained_path(stage_output_paths, stage):
     chain = {
+        1: 0,
         2: 1,
         3: 2,
         4: 3,

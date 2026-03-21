@@ -299,9 +299,10 @@ class FocalLoss(nn.Module):
     .. note::
         For batched input, this loss function computes the averaged loss among all instances in the batch.
     """
-    def __init__(self, gamma=0., eps=1e-15):
+    def __init__(self, gamma=0., alpha=0.9, eps=1e-15):
         super(FocalLoss, self).__init__()
         self.gamma = gamma
+        self.alpha = alpha
         self.eps = eps
 
     def forward(self, pred_dsmat: Tensor, gt_perm: Tensor, src_ns: Tensor, tgt_ns: Tensor) -> Tensor:
@@ -329,12 +330,58 @@ class FocalLoss(nn.Module):
             x = pred_dsmat[b, :src_ns[b], :tgt_ns[b]]
             y = gt_perm[b, :src_ns[b], :tgt_ns[b]]
             loss += torch.sum(
-                - (1 - x) ** self.gamma * y * torch.log(x + self.eps)
-                - x ** self.gamma * (1 - y) * torch.log(1 - x + self.eps)
+                - self.alpha * (1 - x) ** self.gamma * y * torch.log(x + self.eps)
+                - (1 - self.alpha) * x ** self.gamma * (1 - y) * torch.log(1 - x + self.eps)
             )
             n_sum += src_ns[b].to(n_sum.dtype).to(pred_dsmat.device)
 
         return loss / n_sum
+
+
+class RowWiseNLLLoss(nn.Module):
+    r"""
+    Row-wise NLL loss for soft assignment matrices.
+
+    For each source node ``i`` that has a ground-truth match ``j``, maximise
+    ``log S[i, j]``.  Rows with no match (all-zero in ``gt_perm``) are skipped
+    so the loss is never ill-posed for partially-matched pairs.
+
+    Normalised by the total number of matched source nodes across the batch.
+
+    :param eps: small constant for numerical stability inside ``log``.
+    """
+    def __init__(self, eps: float = 1e-15):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred_dsmat: Tensor, gt_perm: Tensor, src_ns: Tensor, tgt_ns: Tensor) -> Tensor:
+        batch_num = pred_dsmat.shape[0]
+        pred_dsmat = pred_dsmat.to(dtype=torch.float32)
+
+        loss = torch.tensor(0.0, device=pred_dsmat.device)
+        n_matched = torch.tensor(0.0, device=pred_dsmat.device)
+
+        for b in range(batch_num):
+            n1 = int(src_ns[b].item())
+            n2 = int(tgt_ns[b].item())
+            if n1 == 0 or n2 == 0:
+                continue
+
+            s  = pred_dsmat[b, :n1, :n2]   # (n1, n2)
+            gt = gt_perm[b, :n1, :n2]       # (n1, n2)
+
+            matched_mask = gt.sum(dim=1) > 0  # (n1,) — rows with a valid target
+            if matched_mask.sum() == 0:
+                continue
+
+            gt_idx   = gt[matched_mask].argmax(dim=1)          # (k,)
+            log_s    = torch.log(s[matched_mask].clamp(self.eps))  # (k, n2)
+            loss     = loss + F.nll_loss(log_s, gt_idx, reduction='sum')
+            n_matched = n_matched + matched_mask.sum().float()
+
+        if n_matched == 0:
+            return torch.tensor(0.0, device=pred_dsmat.device)
+        return loss / n_matched
 
 
 class InnerProductLoss(nn.Module):

@@ -40,7 +40,7 @@ GNN_FEAT = [16, 16, 16]
 EDGE_EMB = False
 BATCH_SIZE = 16
 
-UNIV_SIZE = 600
+UNIV_SIZE = 300
 SK_ITER_NUM = 25
 SK_EPSILON = 1e-10
 K_FACTOR = 5.0
@@ -63,7 +63,7 @@ def concat_features(embeddings, num_vertices):
 
 
 class Net(CNN):
-    def __init__(self, has_dustbin: bool = False):
+    def __init__(self, has_dustbin: bool = False, univ_size: int = UNIV_SIZE):
         super(Net, self).__init__()
         self.has_dustbin = has_dustbin
         self.bin_score = nn.Parameter(torch.tensor(1.0))
@@ -82,7 +82,7 @@ class Net(CNN):
         self.sparse = True
         self.rescale = RESCALE
         self.tau = SK_TAU
-        self.univ_size = UNIV_SIZE
+        self.univ_size = univ_size
         self.gnn_layer = GNN_LAYER
 
         self.k_factor = K_FACTOR
@@ -137,7 +137,7 @@ class Net(CNN):
         if self.regression:
             self.k_params_id = []
             if self.afau:
-                self.encoder_k = Encoder()
+                self.encoder_k = Encoder(embedding_dim=self.univ_size)
 
                 self.k_params_id += [id(item) for item in self.encoder_k.parameters()]
 
@@ -263,7 +263,7 @@ class Net(CNN):
 
         quadratic_affs_list = [[0.5 * x for x in quadratic_affs] for quadratic_affs in quadratic_affs_list]
 
-        s_list, mgm_s_list, x_list, mgm_x_list, ss_db_list, indices = [], [], [], [], [], []
+        s_list, x_list, ss_db_list, indices = [], [], [], []
 
         for unary_affs, quadratic_affs, (idx1, idx2) in zip(unary_affs_list, quadratic_affs_list, lexico_iter(range(num_graphs))):
             if not self.sparse:

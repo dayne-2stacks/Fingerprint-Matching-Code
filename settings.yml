@@ -21,4 +21,5 @@ policy_defaults:
 data_defaults:
   dataset_len: 640
   train_root: dataset/Poly2/DBII
+  UNIV_SIZE: 300
   # train_root: dataset/L3SF_V2/L3-SF

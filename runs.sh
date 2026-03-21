@@ -16,7 +16,7 @@ set -e
 # Examples:
 #   sbatch run.sh baseline
 #   sbatch run.sh sweep_lr --config-dir config_sweep --set LR=5e-3
-EXP_NAME="${1:-default}"j
+EXP_NAME="${1:-default}"
 
 echo "Starting job on $(hostname)"
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"

@@ -6,6 +6,7 @@ train:
   BACKBONE_LR: 5.e-6
   OUTPUT_PATH: results5/joint/stage4
   PRETRAINED_PATH: results5/joint/stage4/params/best_model.pt
+  PERM_LOSS: row_nll
 ngm:
   REGRESSION: true
   DUSTBIN_REJECT_ENABLE: true

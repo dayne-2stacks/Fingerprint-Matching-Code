@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import logging
+import signal
 from pathlib import Path
 import cv2
 import numpy as np
@@ -21,7 +22,7 @@ from src.model.ngm2 import (
 )
 from utils.data_to_cuda import data_to_cuda
 from src.parallel import DataParallel
-from src.loss_func import WeightedPermLoss, PermutationLoss, PermutationLossHung, FocalLoss
+from src.loss_func import WeightedPermLoss, PermutationLoss, PermutationLossHung, FocalLoss, RowWiseNLLLoss
 from utils.models_sl import save_model, load_model, load_optimizer
 from utils.visualize import visualize_stochastic_matrix, visualize_match, to_grayscale_cv2_image
 from src.evaluation_metric import matching_accuracy
@@ -48,6 +49,57 @@ def _set_batchnorm_eval(module):
     """Set BatchNorm layers to eval mode so running stats stay frozen."""
     if isinstance(module, _BatchNorm):
         module.eval()
+
+
+# Mutable state updated each epoch so the SIGTERM handler can save a mid-run checkpoint.
+_sigterm_state: dict = {
+    "model": None,
+    "optimizer": None,
+    "optimizer_k": None,
+    "scheduler": None,
+    "scheduler_k": None,
+    "checkpoint_path": None,
+    "start_file": None,
+    "epoch": None,
+    "end_epoch": None,
+    "best_loss": float("inf"),
+    "no_improvement_count": 0,
+}
+
+
+def _sigterm_handler(signum, frame):
+    state = _sigterm_state
+    if state["model"] is None or state["epoch"] is None:
+        print("[SIGTERM] No training state to save. Exiting.")
+        raise SystemExit(0)
+
+    epoch = state["epoch"]
+    checkpoint_path = state["checkpoint_path"]
+    print(f"[SIGTERM] Signal received — saving checkpoint at epoch {epoch} to {checkpoint_path} ...")
+
+    save_model(state["model"], str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
+    torch.save(state["optimizer"].state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
+    if state["optimizer_k"] is not None:
+        torch.save(state["optimizer_k"].state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+
+    if state["scheduler"] is not None:
+        torch.save(state["scheduler"].state_dict(), str(checkpoint_path / "scheduler.pt"))
+    if state["scheduler_k"] is not None:
+        torch.save(state["scheduler_k"].state_dict(), str(checkpoint_path / "scheduler_k.pt"))
+
+    with open(state["start_file"], "w") as f:
+        json.dump({
+            "start_epoch": epoch + 1,
+            "end_epoch": state["end_epoch"],
+            "best_loss": state["best_loss"],
+            "no_improvement_count": state["no_improvement_count"],
+        }, f)
+
+    print(f"[SIGTERM] Checkpoint saved (resume from epoch {epoch + 1}). Exiting.")
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def _parse_args():
@@ -150,16 +202,27 @@ for file in config_files:
     writer = SummaryWriter(log_dir=str(log_dir))
     
     # Hyperparameters from config
+    num_iterations = int(stage_cfg["num_iterations"]) if "num_iterations" in stage_cfg else None
+    num_epochs = int(stage_cfg["num_epochs"])
+
     if os.path.exists(start_file):
         with open(start_file, "r") as f:
             start_data = json.load(f)
-            start_epoch = start_data.get("start_epoch", 0)  # Default to 0 if not found
-            print(f"Resuming training from epoch {start_epoch}")
+            start_epoch = start_data.get("start_epoch", 0)
+            end_epoch = start_data.get("end_epoch", start_epoch + num_epochs)
+            resume_best_loss = float(start_data.get("best_loss", float("inf")))
+            resume_no_improvement = int(start_data.get("no_improvement_count", 0))
+            print(f"Resuming training from epoch {start_epoch}, end epoch {end_epoch}, "
+                  f"best_loss={resume_best_loss:.4f}, no_improvement={resume_no_improvement}")
     else:
         start_epoch = int(stage_cfg["start_epoch"])
+        end_epoch = start_epoch + num_epochs
+        resume_best_loss = float("inf")
+        resume_no_improvement = 0
 
-    num_iterations = int(stage_cfg["num_iterations"])
-    num_epochs = int(stage_cfg["num_epochs"])
+    if start_epoch >= end_epoch:
+        print(f"Stage {stage} already complete (epoch {start_epoch}/{end_epoch}), skipping.")
+        continue
     BATCH_SIZE = int(stage_cfg["BATCH_SIZE"])
     BM_NAME = stage_cfg["BM_NAME"]
     FILTER = stage_cfg["FILTER"]
@@ -187,10 +250,12 @@ for file in config_files:
     # =====================================================
     # Hard-Coded and Derived Parameters
     # =====================================================
-    dataset_len = int(global_cfg["data_defaults"]["dataset_len"])
+    _raw_len = stage_cfg.get("dataset_len")
+    dataset_len = None if _raw_len is None else int(_raw_len)
+    univ_size = int(global_cfg["data_defaults"].get("UNIV_SIZE", 300))
 
-    best_loss = float('inf')
-    no_improvement_count = 0
+    best_loss = resume_best_loss
+    no_improvement_count = resume_no_improvement
 
     # File paths
     # Default to the synthetic dataset; override for stage 6
@@ -221,14 +286,20 @@ for file in config_files:
         overfit_to_train_split=OVERFIT_TO_TRAIN_SPLIT,
         stage=stage,
         has_dustbin=DUSTBIN_REJECT_ENABLE,
+        univ_size=univ_size,
     )
     # =====================================================
     # Model, Loss, and Device Setup
     # =====================================================
-    model = Net(has_dustbin=DUSTBIN_REJECT_ENABLE)
+    model = Net(has_dustbin=DUSTBIN_REJECT_ENABLE, univ_size=univ_size)
 
-    criterion = FocalLoss(gamma=FOCAL_GAMMA)
-    # criterion = PermutationLoss()
+    PERM_LOSS = stage_cfg.get("PERM_LOSS", "focal")
+    if PERM_LOSS == "row_nll":
+        criterion = RowWiseNLLLoss()
+    elif PERM_LOSS == "perm":
+        criterion = PermutationLoss()
+    else:
+        criterion = FocalLoss(gamma=FOCAL_GAMMA)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
@@ -243,6 +314,7 @@ for file in config_files:
     optimizer, optimizer_k = _build_optimizers(model, stage_param_groups, LR, BACKBONE_LR, K_LR)
 
     stage_messages = {
+        0: "Stage 0: warm up matcher only (backbone/k/dustbin frozen; genuine pairs only).",
         1: "Stage 1: train shared matcher baseline (matcher/backbone active; k/dustbin frozen).",
         2: "Stage 2: train K heads while matcher/backbone stay mostly frozen.",
         3: "Stage 3: train dustbin only (matcher/backbone/K frozen).",
@@ -308,6 +380,16 @@ for file in config_files:
     if len(optim_k_path) > 0:
         print("Loading optimizer_k state from {}".format(optim_k_path))
         load_optimizer(optimizer_k, optim_k_path)
+
+    sched_path = checkpoint_path / "scheduler.pt"
+    if sched_path.exists():
+        print(f"Restoring scheduler state from {sched_path}")
+        scheduler.load_state_dict(torch.load(str(sched_path), map_location="cpu"))
+    sched_k_path = checkpoint_path / "scheduler_k.pt"
+    if sched_k_path.exists() and scheduler_k is not None:
+        print(f"Restoring scheduler_k state from {sched_k_path}")
+        scheduler_k.load_state_dict(torch.load(str(sched_k_path), map_location="cpu"))
+
     # WarmupScheduler already applies the initial warmup step when it is created.
     # Avoid manually scaling LRs here, or the first-epoch LR is reduced twice.
     print("Warmup schedulers initialized; keeping scheduler-managed starting learning rates.")
@@ -323,11 +405,25 @@ for file in config_files:
     # =====================================================
     # Training Loop
     # =====================================================
-    for epoch in range(start_epoch, start_epoch + num_epochs):
-        logger.info(f"Epoch {epoch}/{start_epoch + num_epochs - 1}")
+    for epoch in range(start_epoch, end_epoch):
+        logger.info(f"Epoch {epoch}/{end_epoch - 1}")
         logger.info("-" * 50)
-        print("Epoch {}/{}".format(epoch, start_epoch + num_epochs - 1))
+        print("Epoch {}/{}".format(epoch, end_epoch - 1))
         print("-" * 10)
+
+        _sigterm_state.update({
+            "model": model,
+            "optimizer": optimizer,
+            "optimizer_k": optimizer_k,
+            "scheduler": scheduler,
+            "scheduler_k": scheduler_k,
+            "checkpoint_path": checkpoint_path,
+            "start_file": start_file,
+            "epoch": epoch,
+            "end_epoch": end_epoch,
+            "best_loss": best_loss,
+            "no_improvement_count": no_improvement_count,
+        })
 
         model.train()
         if stage in (2, 3):
@@ -384,11 +480,26 @@ for file in config_files:
             no_improvement_count = 0
             best_model_path = str(checkpoint_path / "best_model.pt")
             save_model(model, best_model_path)
+            torch.save(scheduler.state_dict(), str(checkpoint_path / "scheduler.pt"))
+            if scheduler_k is not None:
+                torch.save(scheduler_k.state_dict(), str(checkpoint_path / "scheduler_k.pt"))
             with open(start_file, "w") as f:
-                json.dump({"start_epoch": epoch + 1}, f)
+                json.dump({
+                    "start_epoch": epoch + 1,
+                    "end_epoch": end_epoch,
+                    "best_loss": best_loss,
+                    "no_improvement_count": no_improvement_count,
+                }, f)
         else:
             no_improvement_count += 1
             print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(no_improvement_count, best_loss))
+            with open(start_file, "w") as f:
+                json.dump({
+                    "start_epoch": epoch + 1,
+                    "end_epoch": end_epoch,
+                    "best_loss": best_loss,
+                    "no_improvement_count": no_improvement_count,
+                }, f)
             if no_improvement_count >= patience:
                 print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
                 break

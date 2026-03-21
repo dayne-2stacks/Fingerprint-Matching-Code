@@ -24,7 +24,7 @@ def map_keypoints(kp: tuple) -> str:
 
 
 
-def subject_pore_labels( subject_dict):
+def subject_pore_labels(subject_dict, max_sq_alignment_error: float = 25.0):
     
     uf = UnionFind()
     component_members = {}
@@ -64,7 +64,9 @@ def subject_pore_labels( subject_dict):
             seen_img1 = set()
             seen_img2 = set()
 
-            for match in sorted(anno['matches'], key=lambda m: m.get('sq_alignment_error', float('inf'))):
+            for match in sorted(anno['matches'], key=lambda m: (m.get('sq_alignment_error', float('inf')), m.get('descriptor_distance', float('inf')))):
+                if match.get('sq_alignment_error', float('inf')) > max_sq_alignment_error:
+                    break
                 kp1 = match['img1_point_rc']
                 kp2 = match['img2_point_rc']
                 kp1_key = map_keypoints(kp1)

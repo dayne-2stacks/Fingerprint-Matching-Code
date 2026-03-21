@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from itertools import islice
 from utils.data_to_cuda import data_to_cuda
 from utils.models_sl import save_model
-from src.model.dustbin import strip_dustbin_from_outputs
 from src.train.common import (
     batch_match_counts,
     compose_total_loss,
@@ -30,131 +29,112 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
 
     torch.autograd.set_detect_anomaly(bool(detect_anomaly))
     
-    # One dataloader pass per epoch; extra passes distort LR schedule and early stopping.
-    for _ in range(3):
-        for batch_idx, batch in enumerate(islice(dataloader, max_iters)):
-            iter_num += 1
+    # One dataloader pass per epoch
+    for batch_idx, batch in enumerate(islice(dataloader, max_iters)):
+        iter_num += 1
 
-            batch = data_to_cuda(batch)
-            
-            optimizer.zero_grad()
-            if optimizer_k is not None:
-                optimizer_k.zero_grad()
-            
-            # outputs = model(batch, stage=stage,)
-            if stage == 1:
-                # Forward pass
-                outputs = model(batch, regression=False)
-            else:
-                outputs = model(batch, regression=True)
+        batch = data_to_cuda(batch)
+        
+        optimizer.zero_grad()
+        if optimizer_k is not None:
+            optimizer_k.zero_grad()
+        
+        if stage == 1:
+            outputs = model(batch, regression=False)
+        else:
+            outputs = model(batch, regression=True)
 
-            # if stage == 3:
-            #     loss = criterion(outputs["ds_mat_dustbin"], outputs["gt_perm_mat"], *outputs["ns"])
+        loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
 
-            #     strip_dustbin_from_outputs(outputs)
-            # else: 
-            #     if stage == 4:
-            #         loss = criterion(outputs["ds_mat_dustbin"], outputs["gt_perm_mat"], *outputs["ns"])
-            #     strip_dustbin_from_outputs(outputs)
-            #     # compute loss and their gradients
-            #     if stage == 1:
-            #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            #     elif stage == 4:
-            #         loss += criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            #     elif stage == 2:
-            #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            #     else:
-            loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
+        ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
+        ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
 
-            ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
-            ks_error = outputs.get("ks_error", torch.tensor(0.0, device=device))
+        dustbin_loss = torch.tensor(0.0, device=device)
+        ss_db = outputs.get("ds_mat_db")
+        if ss_db is not None:
+            gt_perm = outputs["gt_perm_mat"]
+            n1s, n2s = outputs["ns"]
+            eps = 1e-15
+            n_valid = 0
+            for b in range(ss_db.shape[0]):
+                n1_b = int(n1s[b])
+                n2_b = int(n2s[b])
+                if n1_b == 0 or n2_b == 0:
+                    continue
+                gt_db_col = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=1)).clamp(0.0, 1.0)
+                gt_db_row = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=0)).clamp(0.0, 1.0)
+                pred_db_col = ss_db[b, :n1_b, n2_b].clamp(eps, 1 - eps)
+                pred_db_row = ss_db[b, n1_b, :n2_b].clamp(eps, 1 - eps)
+                dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_col, gt_db_col, reduction='mean')
+                dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_row, gt_db_row, reduction='mean')
+                n_valid += 1
+            if n_valid > 0:
+                dustbin_loss = dustbin_loss / n_valid
 
-            dustbin_loss = torch.tensor(0.0, device=device)
-            ss_db = outputs.get("ds_mat_db")
-            if ss_db is not None:
-                gt_perm = outputs["gt_perm_mat"]
-                n1s, n2s = outputs["ns"]
-                eps = 1e-15
-                n_valid = 0
-                for b in range(ss_db.shape[0]):
-                    n1_b = int(n1s[b])
-                    n2_b = int(n2s[b])
-                    if n1_b == 0 or n2_b == 0:
-                        continue
-                    gt_db_col = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=1)).clamp(0.0, 1.0)
-                    gt_db_row = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=0)).clamp(0.0, 1.0)
-                    pred_db_col = ss_db[b, :n1_b, n2_b].clamp(eps, 1 - eps)
-                    pred_db_row = ss_db[b, n1_b, :n2_b].clamp(eps, 1 - eps)
-                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_col, gt_db_col, reduction='mean')
-                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_row, gt_db_row, reduction='mean')
-                    n_valid += 1
-                if n_valid > 0:
-                    dustbin_loss = dustbin_loss / n_valid
+        total_loss = compose_total_loss(
+            primary_loss=loss,
+            ks_loss=ks_loss,
+            dustbin_loss=dustbin_loss,
+            stage=stage,
+        )
 
-            total_loss = compose_total_loss(
-                primary_loss=loss,
-                ks_loss=ks_loss,
-                dustbin_loss=dustbin_loss,
-                stage=stage,
-            )
+        if not torch.isfinite(total_loss).all():
+            print(f"[WARN] Non-finite loss at iter {iter_num}, skipping batch.")
+            logger.warning("Non-finite loss at iter %s, skipping batch.", iter_num)
+            continue
 
-            if not torch.isfinite(total_loss).all():
-                print(f"[WARN] Non-finite loss at iter {iter_num}, skipping batch.")
-                logger.warning("Non-finite loss at iter %s, skipping batch.", iter_num)
-                continue
+        loss_value = loss.item()
+        ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
+        total_loss_value = total_loss.item()
+        total_loss.backward()
 
-            loss_value = loss.item()
-            ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else ks_loss
-            total_loss_value = total_loss.item()
-            total_loss.backward()
+        # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
 
-            # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+        optimizer.step()
+        if optimizer_k is not None:
+            optimizer_k.step()
 
-            optimizer.step()
-            if optimizer_k is not None:
-                optimizer_k.step()
+        epoch_loss_sum += loss_value
+        epoch_total_loss_sum += total_loss_value
+        running_ks_loss += ks_loss_value
+        running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
+        running_dustbin_loss += dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else dustbin_loss
 
-            epoch_loss_sum += loss_value
-            epoch_total_loss_sum += total_loss_value
-            running_ks_loss += ks_loss_value
-            running_ks_error += ks_error.item() if isinstance(ks_error, torch.Tensor) else ks_error
-            running_dustbin_loss += dustbin_loss.item() if isinstance(dustbin_loss, torch.Tensor) else dustbin_loss
+        batch_counts = batch_match_counts(outputs)
+        batch_tp = batch_counts["tp"]
+        batch_tn = batch_counts["tn"]
+        batch_fp = batch_counts["fp"]
+        batch_fn = batch_counts["fn"]
 
-            batch_counts = batch_match_counts(outputs)
-            batch_tp = batch_counts["tp"]
-            batch_tn = batch_counts["tn"]
-            batch_fp = batch_counts["fp"]
-            batch_fn = batch_counts["fn"]
+        print(f"Batch {batch_idx}: \n TP={batch_tp}, \n TN={batch_tn}, \n FP={batch_fp}, \n FN={batch_fn}")
+        metric_tp_sum += batch_tp
+        metric_tn_sum += batch_tn
+        metric_fp_sum += batch_fp
+        metric_fn_sum += batch_fn
 
-            print(f"Batch {batch_idx}: \n TP={batch_tp}, \n TN={batch_tn}, \n FP={batch_fp}, \n FN={batch_fn}")
-            metric_tp_sum += batch_tp
-            metric_tn_sum += batch_tn
-            metric_fp_sum += batch_fp
-            metric_fn_sum += batch_fn
+        batch_summary = counts_summary(batch_tp, batch_tn, batch_fp, batch_fn, device)
+        batch_scalars = summary_scalars(batch_summary)
+        acc = batch_scalars["accuracy"]
+        prec = batch_scalars["precision"]
+        rec = batch_scalars["recall"]
+        f1 = batch_scalars["f1"]
+        micro_f1 = batch_scalars["micro_f1"]
+        macro_f1 = batch_scalars["macro_f1"]
 
-            batch_summary = counts_summary(batch_tp, batch_tn, batch_fp, batch_fn, device)
-            batch_scalars = summary_scalars(batch_summary)
-            acc = batch_scalars["accuracy"]
-            prec = batch_scalars["precision"]
-            rec = batch_scalars["recall"]
-            f1 = batch_scalars["f1"]
-            micro_f1 = batch_scalars["micro_f1"]
-            macro_f1 = batch_scalars["macro_f1"]
+        if iter_num % 5 == 0:
+            avg_loss = epoch_loss_sum / iter_num
+            avg_ks_loss = running_ks_loss / iter_num
+            avg_dustbin_loss = running_dustbin_loss / iter_num
+            avg_total_loss = epoch_total_loss_sum / iter_num
 
-            if iter_num % 5 == 0:
-                avg_loss = epoch_loss_sum / iter_num
-                avg_ks_loss = running_ks_loss / iter_num
-                avg_dustbin_loss = running_dustbin_loss / iter_num
-                avg_total_loss = epoch_total_loss_sum / iter_num
-
-                log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
-                        f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
-                        f"db_loss: {avg_dustbin_loss:.4f}, "
-                        f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}, "
-                        f"P: {prec:.4f}, R: {rec:.4f}, F1: {f1:.4f}, "
-                        f"MiF1: {micro_f1:.4f}, MaF1: {macro_f1:.4f}")
-                print(log_msg)
-                logger.info(log_msg)
+            log_msg = (f"Epoch: {epoch}, Iter: {iter_num}, "
+                    f"Loss: {avg_loss:.4f}, ks_loss: {avg_ks_loss:.4f}, "
+                    f"db_loss: {avg_dustbin_loss:.4f}, "
+                    f"total_loss: {avg_total_loss:.4f}, Acc: {acc:.4f}, "
+                    f"P: {prec:.4f}, R: {rec:.4f}, F1: {f1:.4f}, "
+                    f"MiF1: {micro_f1:.4f}, MaF1: {macro_f1:.4f}")
+            print(log_msg)
+            logger.info(log_msg)
 
     avg_epoch_loss = epoch_loss_sum / iter_num
     avg_ks_loss = running_ks_loss / iter_num
@@ -187,5 +167,11 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
     torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
     if optimizer_k is not None:
         torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+
+    # Delete the previous epoch's numbered checkpoints — best_model.pt is kept separately
+    for stem in (f"params_{epoch:04}.pt", f"optim_{epoch:04}.pt", f"optim_k_{epoch:04}.pt"):
+        old = checkpoint_path / stem
+        if old.exists():
+            old.unlink()
 
     return avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy

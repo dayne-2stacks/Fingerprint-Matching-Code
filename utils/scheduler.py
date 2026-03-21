@@ -20,6 +20,22 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         else:
             return [group['lr'] for group in self.optimizer.param_groups]
 
+    def state_dict(self):
+        return {
+            "last_epoch": self.last_epoch,
+            "finished": self.finished,
+            "_step_count": self._step_count,
+            "_last_lr": self._last_lr,
+            "after_scheduler": self.after_scheduler.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        self.last_epoch = state_dict["last_epoch"]
+        self.finished = state_dict["finished"]
+        self._step_count = state_dict["_step_count"]
+        self._last_lr = state_dict["_last_lr"]
+        self.after_scheduler.load_state_dict(state_dict["after_scheduler"])
+
     def step(self, metrics=None):
         if self.last_epoch < self.warmup_epochs:
             super().step()

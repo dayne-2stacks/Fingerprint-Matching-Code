@@ -49,26 +49,11 @@ def validate_epoch(
             # Send data to device
             batch = data_to_cuda(batch)
 
-             # outputs = model(batch, stage=stage,)
             if stage == 1:
-                # Forward pass
                 outputs = model(batch, regression=False)
             else:
                 outputs = model(batch, regression=True)
-            # if stage == 3:
-            #     loss = criterion(outputs["ds_mat_dustbin"], outputs["gt_perm_mat"], *outputs["ns"])
 
-            # else: 
-            #     strip_dustbin_from_outputs(outputs)
-
-            #     # compute loss and their gradients
-            #     if stage == 1:
-            #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-
-            #     elif stage == 4:
-            #         loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-
-            #     elif stage == 2:
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))

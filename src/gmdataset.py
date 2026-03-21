@@ -46,9 +46,10 @@ RANDOM_SEED=145
 DATALOADER_NUM=2  
 
 class GMDataset(Dataset):
-    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None, has_dustbin: bool = True):
+    def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None, has_dustbin: bool = True, univ_size: int = UNIV_SIZE):
         self.name = name
         self.has_dustbin = has_dustbin
+        self.univ_size = univ_size
         self.bm = bm
         self.using_all_graphs = using_all_graphs
         self.obj_size = self.bm.obj_resize
@@ -161,8 +162,8 @@ class GMDataset(Dataset):
             img2, ann2 = _standardize(image, annos)
 
         if clip_to_univ:
-            ann1 = ann1[:UNIV_SIZE]
-            ann2 = ann2[:UNIV_SIZE]
+            ann1 = ann1[:self.univ_size]
+            ann2 = ann2[:self.univ_size]
         return (img1, ann1), (img2, ann2)
 
     def _augment_or_standardize_pair_diff(self, img1_orig, ann1_base, img2_orig, ann2_base, clip_to_univ: bool = False):
@@ -176,10 +177,10 @@ class GMDataset(Dataset):
             img2, ann2 = _standardize(img2_orig, ann2_base)
 
         if clip_to_univ:
-            if len(ann1) > UNIV_SIZE:
-                ann1 = ann1[:UNIV_SIZE]
-            if len(ann2) > UNIV_SIZE:
-                ann2 = ann2[:UNIV_SIZE]
+            if len(ann1) > self.univ_size:
+                ann1 = ann1[:self.univ_size]
+            if len(ann2) > self.univ_size:
+                ann2 = ann2[:self.univ_size]
         return (img1, ann1), (img2, ann2)
 
 
@@ -401,10 +402,10 @@ def collate_fn(data: list, has_dustbin: bool = True):
 
             K1G = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(G2, G1)]
             K1H = [kronecker_sparse(x, y).astype(sparse_dtype) for x, y in zip(H2, H1)]
-            ret['KGHs'] = CSRMatrix3d(K1G), CSCMatrix3d(K1H).transpose()
+            # ret['KGHs'] = CSRMatrix3d(K1G), CSCMatrix3d(K1H).transpose()  # unused: model always uses sparse path
 
             ret['KGHs_sparse'] = [
-                (CSCMarix3d([kg]).indices, CSCMatrix3d([kh]).indices) for kg, kh in zip(K1G, K1H)
+                (CSCMatrix3d([kg]).indices, CSCMatrix3d([kh]).indices) for kg, kh in zip(K1G, K1H)
             ]
         else:
             raise ValueError('Data type not understood.')

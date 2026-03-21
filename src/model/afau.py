@@ -23,22 +23,22 @@ class Encoder(nn.Module):
     """
     AFA-U graph attention module to generate bipartite node embeddings.
     """
-    model_params = {
-        'embedding_dim': 600,
-        'head_num': 16,
-        'qkv_dim': 16,
-        'ff_hidden_dim': 256,
-        'ms_hidden_dim': 16,
-        'ms_layer1_init': 10,
-        'ms_layer2_init': 10,
-        'sqrt_qkv_dim': math.sqrt(16),
-    }
 
-    def __init__(self):
+    def __init__(self, embedding_dim: int = 600):
         super().__init__()
+        model_params = {
+            'embedding_dim': embedding_dim,
+            'head_num': 16,
+            'qkv_dim': 16,
+            'ff_hidden_dim': 256,
+            'ms_hidden_dim': 16,
+            'ms_layer1_init': 10,
+            'ms_layer2_init': 10,
+            'sqrt_qkv_dim': math.sqrt(16),
+        }
         self.layers = nn.ModuleList([
-            EncoderLayer(**self.model_params),
-            EncoderLayer(**self.model_params),
+            EncoderLayer(**model_params),
+            EncoderLayer(**model_params),
             ])
 
     def forward(self, row_emb, col_emb, cost_mat):

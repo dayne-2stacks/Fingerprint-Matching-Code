@@ -455,14 +455,14 @@ def apply_single_transform(image, annotation, transformation_type, finalize=True
         transformed_annotations = [a for a, m in zip(annotation, mask) if m]
         transformed_image = image
     elif transformation_type == "add_pore_noise":
-        transformed_annotations = add_random(annotation, 25, image.shape[0], image.shape[1])
+        transformed_annotations = add_random(annotation, 25, image.shape[1], image.shape[0])
         transformed_image = image
     elif transformation_type == "elastic_transform":
         transformed_image, transformed_annotations = _apply_joint_geometric_torchvision(
             image,
             annotation,
             elastic_sigma=np.random.uniform(8, 20),
-            elastic_alpha=np.random.uniform(0, 120),
+            elastic_alpha=np.random.uniform(1, 10),
         )
 
     elif transformation_type == "gaussian_blur":
@@ -514,18 +514,26 @@ def apply_single_transform(image, annotation, transformation_type, finalize=True
             
             # Generate salt noise (white pixels)
             num_salt = int(np.ceil(amount * image.size * s_vs_p))
-            salt_coords = [np.random.randint(0, i-1, num_salt) for i in image.shape]
+            salt_coords = [np.random.randint(0, i, num_salt) for i in image.shape]
             transformed_image[salt_coords[0], salt_coords[1]] = 255
             
             # Generate pepper noise (black pixels)
             num_pepper = int(np.ceil(amount * image.size * (1 - s_vs_p)))
-            pepper_coords = [np.random.randint(0, i-1, num_pepper) for i in image.shape]
+            pepper_coords = [np.random.randint(0, i, num_pepper) for i in image.shape]
             transformed_image[pepper_coords[0], pepper_coords[1]] = 0
         
         # Noise doesn't change keypoint positions
         transformed_annotations = [[id_, x, y] for id_, x, y in annotation]
 
-    elif transformation_type in ("color_jitter", "brightness_contrast_gamma"):
+    elif transformation_type == "brightness_contrast_gamma":
+        img_t = _to_torch_image(image).float() / 255.0
+        img_t = tv_transforms.RandomApply(
+            [tv_transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.0, hue=0.0)],
+            p=0.8,
+        )(img_t)
+        transformed_image = _from_torch_image(img_t * 255.0, image.shape)
+        transformed_annotations = [[id_, x, y] for id_, x, y in annotation]
+    elif transformation_type == "color_jitter":
         # Photometric jitter (no keypoint movement)
         img_t = _to_torch_image(image).float() / 255.0
         img_t = _COLOR_JITTER_APPLY(img_t)
@@ -589,9 +597,10 @@ def augment_image_pair(image, annotation, min_points=5, min_common=4, max_attemp
         if len(common) >= min_common:
             return (img1, annos1), (img2, annos2)
 
-    # Fallback: standardized pair with identical geometry
+    # Fallback: jitter one view so the pair isn't identical.
     img1, ann1 = _standardize_to_model(image, annotation)
-    img2, ann2 = _standardize_to_model(image, annotation)
+    img2_raw, ann2_raw = apply_single_transform(image, annotation, "color_jitter", finalize=False)
+    img2, ann2 = _standardize_to_model(img2_raw, ann2_raw)
     return (img1, ann1), (img2, ann2)
 
 

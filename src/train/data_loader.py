@@ -11,6 +11,7 @@ def build_dataloaders(
     overfit_to_train_split: bool = False,
     stage: int = 4,
     has_dustbin: bool = True,
+    univ_size: int = 300,
 ):
     """Create dataloaders for training, validation and testing.
 
@@ -30,7 +31,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=True if stage == 1 else False,
+        only_genuine=stage in (0, 1),
     )
 
     test_bm = BM(
@@ -38,7 +39,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=True if stage == 1 else False,
+        only_genuine=stage in (0, 1),
     )
 
     val_bm = BM(
@@ -46,7 +47,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=True if stage == 1 else False,
+        only_genuine=stage in (0, 1),
     )
 
     ds_name = {
