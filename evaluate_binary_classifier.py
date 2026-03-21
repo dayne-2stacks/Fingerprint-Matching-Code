@@ -33,7 +33,7 @@ from utils.visualize import visualize_stochastic_matrix, visualize_match, to_gra
 from src.model.dustbin import ns_pair_to_ints, strip_dustbin_from_outputs
 
 
-def evaluate(dataset_name: str, data_root: str, filter=None):
+def evaluate(dataset_name: str, data_root: str, filter=None, score_mode: str = "perm"):
     """Run evaluation using the best classifier model for the chosen dataset.
     """
     dataset_len = None
@@ -94,8 +94,10 @@ def evaluate(dataset_name: str, data_root: str, filter=None):
             min_points = torch.min(ns[0], ns[1]).float().clamp(min=1.0)
             k_score = (k_pred / min_points).clamp(0, 1)
 
-           
-            prob = k_score
+            if score_mode == "k_head" and "k_prob" in outputs:
+                prob = outputs["k_prob"].detach().view(-1).clamp(0, 1).cpu()
+            else:
+                prob = k_score
             all_probs.append(prob.cpu())
             all_labels.append(batch["label"].cpu())
             all_raw_k.append(k_pred.cpu()) 
@@ -438,6 +440,16 @@ if __name__ == "__main__":
         default="none",
         help="Keypoint filter strategy. Use 'none' to keep all keypoints.",
     )
+    parser.add_argument(
+        "--score-mode",
+        choices=["perm", "k_head"],
+        default="perm",
+        help=(
+            "Verification score source. "
+            "'perm': perm_mat.sum()/min_points (default). "
+            "'k_head': direct output of the k-regression head (ks)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -447,4 +459,4 @@ if __name__ == "__main__":
     if filter_value == "none":
         filter_value = None
 
-    evaluate(args.dataset, data_root, filter=filter_value)
+    evaluate(args.dataset, data_root, filter=filter_value, score_mode=args.score_mode)

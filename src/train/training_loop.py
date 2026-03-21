@@ -39,7 +39,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
         if optimizer_k is not None:
             optimizer_k.zero_grad()
         
-        if stage == 1:
+        if stage in (0, 1, 2):
             outputs = model(batch, regression=False)
         else:
             outputs = model(batch, regression=True)

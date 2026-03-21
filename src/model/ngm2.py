@@ -80,7 +80,7 @@ class Net(CNN):
 
         # self.trainings = True
         self.sparse = True
-        self.rescale = RESCALE
+        self.rescale = CROPSIZE  # keypoints are in crop space, not pre-crop space
         self.tau = SK_TAU
         self.univ_size = univ_size
         self.gnn_layer = GNN_LAYER
@@ -143,16 +143,16 @@ class Net(CNN):
 
                 self.maxpool = nn.MaxPool1d(kernel_size=self.univ_size)
                 self.final_row = nn.Sequential(
-                    nn.Linear(self.univ_size, 8),
+                    nn.Linear(self.univ_size, self.reg_hidden_feat),
                     nn.ReLU(),
-                    nn.Linear(8, 1),
+                    nn.Linear(self.reg_hidden_feat, 1),
                     nn.Sigmoid()
                 )
 
                 self.final_col = nn.Sequential(
-                    nn.Linear(self.univ_size, 8),
+                    nn.Linear(self.univ_size, self.reg_hidden_feat),
                     nn.ReLU(),
-                    nn.Linear(8, 1),
+                    nn.Linear(self.reg_hidden_feat, 1),
                     nn.Sigmoid()
                 )
 

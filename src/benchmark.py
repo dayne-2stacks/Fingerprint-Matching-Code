@@ -239,7 +239,7 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
         )
         # Ensure on-disk annotations are prepared
         try:
-            json_path = dataset_instance.to_json()
+            json_path = dataset_instance.to_json(force=True)
         except Exception as e:
             import traceback
             print(f"[WARNING] to_json() failed: {e}")

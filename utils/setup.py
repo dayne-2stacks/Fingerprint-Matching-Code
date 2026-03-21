@@ -107,35 +107,34 @@ def _configure_stage_trainability(model, stage):
         param.requires_grad = False
 
     if stage == 0:
-        # Stage 0: warm up matcher only — backbone frozen to preserve ImageNet features
-        # until the GNN produces stable gradients.
+        # Stage 0: matcher warmup only, genuine pairs.
         _set_trainable(groups["matcher"], True)
         _set_trainable(groups["backbone_node"], False)
         _set_trainable(groups["backbone_edge"], False)
         _set_trainable(groups["k_head"], False)
         _set_trainable(groups["dustbin"], False)
     elif stage == 1:
-        # Stage 1: train shared matcher baseline (matcher + backbone), keep k/dustbin frozen.
+        # Stage 1: matcher + backbone, genuine pairs.
         _set_trainable(groups["matcher"], True)
         _set_trainable(groups["backbone_node"], True)
         _set_trainable(groups["backbone_edge"], True)
-
         _set_trainable(groups["k_head"], False)
         _set_trainable(groups["dustbin"], False)
     elif stage == 2:
+        # Stage 2: dustbin only, genuine + imposter pairs.
+        # Matcher/backbone stay frozen so dustbin learns against a stable Sinkhorn.
         _set_trainable(groups["matcher"], False)
         _set_trainable(groups["backbone_node"], False)
         _set_trainable(groups["backbone_edge"], False)
-        # Stage 2: keep matcher stable; train K.
-        _set_trainable(groups["k_head"], True)
-        _set_trainable(groups["dustbin"], False)
-
-    elif stage == 3:
-        _set_trainable(groups["matcher"], False)
         _set_trainable(groups["k_head"], False)
+        _set_trainable(groups["dustbin"], True)
+    elif stage == 3:
+        # Stage 3: k-regression + dustbin, genuine + imposter pairs.
+        # Dustbin continues refining while k-head learns against it.
+        _set_trainable(groups["matcher"], False)
         _set_trainable(groups["backbone_node"], False)
         _set_trainable(groups["backbone_edge"], False)
-        # Stage 3: train dustbin only.
+        _set_trainable(groups["k_head"], True)
         _set_trainable(groups["dustbin"], True)
     elif stage == 4:
         # Stage 4: joint fine-tuning of all modules.

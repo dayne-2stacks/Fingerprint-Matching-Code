@@ -31,7 +31,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=stage in (0, 1),
+        only_genuine=stage in (0, 1),  # stages 0-1: genuine only; 2+: genuine + imposter
     )
 
     test_bm = BM(
@@ -39,7 +39,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=stage in (0, 1),
+        only_genuine=stage in (0, 1),  # stages 0-1: genuine only; 2+: genuine + imposter
     )
 
     val_bm = BM(
@@ -47,7 +47,7 @@ def build_dataloaders(
         obj_resize=RESCALE,
         train_root=train_root,
         filter=filter,
-        only_genuine=stage in (0, 1),
+        only_genuine=stage in (0, 1),  # stages 0-1: genuine only; 2+: genuine + imposter
     )
 
     ds_name = {

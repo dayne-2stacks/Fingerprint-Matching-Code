@@ -615,11 +615,27 @@ class Net(CNN):
         
             
             if bool(self.regression) and k_trainable:
-                ks_loss = F.mse_loss(ks, supervised_ks) * self.k_factor
-                # ks_loss = F.mse_loss(ks, gt_ks) * self.k_factor
+                # Decouple verification from regression:
+                # - Genuine pairs (k>0): MSE toward true match ratio
+                # - Imposter pairs: hinge loss — only penalise if k_pred > margin
+                # - Genuine pairs with k=0 (annotation gap): excluded from both
+                ks_loss = ks.new_tensor(0.0)
+                imposter_margin = 0.1
+                if "label" in data_dict:
+                    labels = data_dict["label"].to(ks.device).view(-1).long()
+                    genuine_mask = (labels == 1) & (gt_ks > 0)
+                    imposter_mask = labels == 0
+                else:
+                    genuine_mask = supervised_ks > 0
+                    imposter_mask = torch.zeros_like(genuine_mask)
+
+                if genuine_mask.any():
+                    ks_loss = ks_loss + F.mse_loss(ks[genuine_mask], supervised_ks[genuine_mask]) * self.k_factor
+                if imposter_mask.any():
+                    hinge = F.relu(ks[imposter_mask] - imposter_margin) ** 2
+                    ks_loss = ks_loss + hinge.mean() * self.k_factor
+
                 ks_error = F.l1_loss(ks * min_point_tensor, gt_ks)
-                # ks_error = F.l1_loss(ks, gt_ks)
-                ks_loss = ks_loss
             else:
                 ks_loss = ks.new_tensor(0.0)
                 ks_error = ks.new_tensor(0.0)

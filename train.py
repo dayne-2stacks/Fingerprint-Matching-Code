@@ -314,11 +314,11 @@ for file in config_files:
     optimizer, optimizer_k = _build_optimizers(model, stage_param_groups, LR, BACKBONE_LR, K_LR)
 
     stage_messages = {
-        0: "Stage 0: warm up matcher only (backbone/k/dustbin frozen; genuine pairs only).",
-        1: "Stage 1: train shared matcher baseline (matcher/backbone active; k/dustbin frozen).",
-        2: "Stage 2: train K heads while matcher/backbone stay mostly frozen.",
-        3: "Stage 3: train dustbin only (matcher/backbone/K frozen).",
-        4: "Stage 4: joint training with matcher/backbone/K/dustbin active.",
+        0: "Stage 0: matcher warmup only (backbone/k/dustbin frozen; genuine pairs only).",
+        1: "Stage 1: matcher + backbone (k/dustbin frozen; genuine pairs only).",
+        2: "Stage 2: dustbin only (matcher/backbone/k frozen; genuine + imposter pairs).",
+        3: "Stage 3: k-regression + dustbin (matcher/backbone frozen; genuine + imposter pairs).",
+        4: "Stage 4: joint fine-tuning (all modules active; genuine + imposter pairs).",
     }
     print(stage_messages.get(stage, f"Stage {stage}: fallback full fine-tuning."))
 

@@ -12,13 +12,17 @@ def compose_total_loss(
     stage=None,
 ):
     dustbin_loss = dustbin_loss if dustbin_loss is not None else 0.0
-    if stage == 0 or stage == 1 or stage == 4:
-        return primary_loss + ks_loss + dustbin_loss
+    if stage in (0, 1):
+        # Genuine only: permutation loss only; k and dustbin are frozen.
+        return primary_loss
     elif stage == 2:
-        return ks_loss
+        # Dustbin warmup: only dustbin loss; matcher/k frozen.
+        return dustbin_loss
     elif stage == 3:
-        return primary_loss + dustbin_loss
+        # k-regression + dustbin: no permutation loss so matcher stays stable.
+        return ks_loss + dustbin_loss
     else:
+        # Stage 4+: joint fine-tuning, all losses active.
         return primary_loss + ks_loss + dustbin_loss
 
 
