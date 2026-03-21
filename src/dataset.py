@@ -259,7 +259,7 @@ class KeypointsForMultiSessionMixin:
             label = desc.get_keypoint(kp)
             if global_label.get(label) is not None:
                 label = global_label[label]
-            keypoints.append({"labels": label, "x": kp[0], "y": kp[1]})
+            keypoints.append({"labels": label, "x": kp[1], "y": kp[0]})
 
         return keypoints
 
