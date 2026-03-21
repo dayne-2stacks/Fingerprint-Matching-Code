@@ -4,7 +4,7 @@ import shutil
 
 
 def train_test_split(root_dir, img_path):
-    os.makedirs(root_dir)
+    os.makedirs(root_dir, exist_ok=True)
     for p in ['train', 'test', 'val']:
         os.mkdir(f'{root_dir}/{p}')
     image_dir = Path(img_path)
@@ -23,7 +23,5 @@ def train_test_split(root_dir, img_path):
         shutil.copy(image, dest)
 
 if __name__ == "__main__":
-    import shutil
-    shutil.rmtree('hello')
     train_test_split('hello', './dataset/polyU/DBII')
     

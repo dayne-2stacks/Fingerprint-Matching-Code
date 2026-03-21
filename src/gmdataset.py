@@ -68,9 +68,7 @@ class GMDataset(Dataset):
         self.problem_type = problem
         # print(f"Classes: {self.classes}")
         # print(f"Benchmark type: {type(self.bm)}")
-        if len(self.classes) > 0:
-            self.img_num_list = self.bm.compute_img_num(self.classes[0])
-        else:
+        if not self.classes:
             print("Error: self.classes is empty!")
         # For classification we rely on the genuine/imposter pairs
         pairs, total_len = self.bm.get_rand_id_combination()
@@ -237,8 +235,12 @@ class GMDataset(Dataset):
         img_path1 = self.bm.get_path(pair[0])
         img_path2 = self.bm.get_path(pair[1])
         img1_orig = cv2.imread(img_path1)
+        if img1_orig is None:
+            raise FileNotFoundError(f"Could not read image: {img_path1}")
         img1_orig = cv2.cvtColor(img1_orig, cv2.COLOR_BGR2RGB)
         img2_orig = cv2.imread(img_path2)
+        if img2_orig is None:
+            raise FileNotFoundError(f"Could not read image: {img_path2}")
         img2_orig = cv2.cvtColor(img2_orig, cv2.COLOR_BGR2RGB)
         annos1_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[0]['kpts']]
         annos2_base = [[kp['labels'], kp['x'], kp['y']] for kp in anno_pair[1]['kpts']]

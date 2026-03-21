@@ -289,13 +289,13 @@ class FingerprintBenchmarkBase(Benchmark, ABC):
         # splits.
 
         if self.sets == 'test':
-            tmpfile = tempfile.gettempdir()
+            cache_base = '/general/dayneguy/cache'
             pid_num = os.getpid()
             cache_dir = str(pid_num) + '_gt_cache'
-            self.gt_cache_path = os.path.join(tmpfile, cache_dir)
+            self.gt_cache_path = os.path.join(cache_base, cache_dir)
 
             if not os.path.exists(self.gt_cache_path):
-                os.mkdir(self.gt_cache_path)
+                os.makedirs(self.gt_cache_path, exist_ok=True)
                 print('gt perm mat cache built')
 
 

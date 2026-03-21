@@ -242,7 +242,6 @@ class KeypointsForMultiSessionMixin:
         if cached is None:
             subject_dict = self._get_anno_by_subject(anno_path)
             cached = subject_pore_labels(subject_dict)
-            self._kpt_cache.clear()
             self._kpt_cache[cache_key] = cached
         return cached
 
