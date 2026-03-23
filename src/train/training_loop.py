@@ -12,9 +12,24 @@ from src.train.common import (
 )
 
 
+def _save_mid_epoch(model, optimizer, optimizer_k, epoch, batch, checkpoint_path):
+    from utils.models_sl import save_model as _sm
+    from torch.nn.parallel import DistributedDataParallel
+    from torch.nn import DataParallel
+    m = model.module if isinstance(model, (DataParallel, DistributedDataParallel)) else model
+    torch.save({
+        "epoch": epoch,
+        "batch": batch,
+        "model": m.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "optimizer_k": optimizer_k.state_dict() if optimizer_k is not None else None,
+    }, str(checkpoint_path / "mid_epoch.pt"))
+
+
 def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
                 device, writer, epoch, start_epoch, stage, logger, checkpoint_path,
-                detect_anomaly=False, max_iters=None):
+                detect_anomaly=False, max_iters=None, is_main=True,
+                start_batch=0, save_every=50):
     # Initialize running sums and counters
     epoch_loss_sum = 0.0
     running_ks_loss = 0.0
@@ -28,9 +43,19 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
     iter_num = 0
 
     torch.autograd.set_detect_anomaly(bool(detect_anomaly))
-    
+
+    it = iter(islice(dataloader, max_iters))
+    # Skip already-completed batches
+    if start_batch > 0:
+        print(f"Resuming epoch {epoch} from batch {start_batch}, skipping ahead...")
+        for _ in range(start_batch):
+            try:
+                next(it)
+            except StopIteration:
+                break
+
     # One dataloader pass per epoch
-    for batch_idx, batch in enumerate(islice(dataloader, max_iters)):
+    for batch_idx, batch in enumerate(it, start=start_batch):
         iter_num += 1
 
         batch = data_to_cuda(batch)
@@ -39,7 +64,7 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
         if optimizer_k is not None:
             optimizer_k.zero_grad()
         
-        if stage in (0, 1, 2):
+        if stage in (0, 1):
             outputs = model(batch, regression=False)
         else:
             outputs = model(batch, regression=True)
@@ -121,6 +146,9 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
         micro_f1 = batch_scalars["micro_f1"]
         macro_f1 = batch_scalars["macro_f1"]
 
+        if is_main and iter_num % save_every == 0:
+            _save_mid_epoch(model, optimizer, optimizer_k, epoch, batch_idx + 1, checkpoint_path)
+
         if iter_num % 5 == 0:
             avg_loss = epoch_loss_sum / iter_num
             avg_ks_loss = running_ks_loss / iter_num
@@ -136,10 +164,11 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
             print(log_msg)
             logger.info(log_msg)
 
-    avg_epoch_loss = epoch_loss_sum / iter_num
-    avg_ks_loss = running_ks_loss / iter_num
-    avg_dustbin_loss = running_dustbin_loss / iter_num
-    avg_total_loss = epoch_total_loss_sum / iter_num
+    denom = max(iter_num, 1)
+    avg_epoch_loss = epoch_loss_sum / denom
+    avg_ks_loss = running_ks_loss / denom
+    avg_dustbin_loss = running_dustbin_loss / denom
+    avg_total_loss = epoch_total_loss_sum / denom
     epoch_metric_summary = matching_metrics_from_counts(
         torch.tensor(metric_tp_sum, device=device),
         torch.tensor(metric_tn_sum, device=device),
@@ -162,16 +191,23 @@ def train_epoch(model, dataloader, criterion, optimizer, optimizer_k,
     print(log_msg)
     logger.info(log_msg)
 
-    # Save model and optimizer states
-    save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
-    torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
-    if optimizer_k is not None:
-        torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+    # Remove mid-epoch checkpoint — epoch completed cleanly
+    if is_main:
+        mid = checkpoint_path / "mid_epoch.pt"
+        if mid.exists():
+            mid.unlink()
 
-    # Delete the previous epoch's numbered checkpoints — best_model.pt is kept separately
-    for stem in (f"params_{epoch:04}.pt", f"optim_{epoch:04}.pt", f"optim_k_{epoch:04}.pt"):
-        old = checkpoint_path / stem
-        if old.exists():
-            old.unlink()
+    # Save model and optimizer states (rank 0 only)
+    if is_main:
+        save_model(model, str(checkpoint_path / f"params_{epoch + 1:04}.pt"))
+        torch.save(optimizer.state_dict(), str(checkpoint_path / f"optim_{epoch + 1:04}.pt"))
+        if optimizer_k is not None:
+            torch.save(optimizer_k.state_dict(), str(checkpoint_path / f"optim_k_{epoch + 1:04}.pt"))
+
+        # Delete the previous epoch's numbered checkpoints — best_model.pt is kept separately
+        for stem in (f"params_{epoch:04}.pt", f"optim_{epoch:04}.pt", f"optim_k_{epoch:04}.pt"):
+            old = checkpoint_path / stem
+            if old.exists():
+                old.unlink()
 
     return avg_epoch_loss, avg_ks_loss, avg_total_loss, avg_accuracy

@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from itertools import islice
 from utils.data_to_cuda import data_to_cuda
 from src.train.common import (
@@ -49,21 +50,43 @@ def validate_epoch(
             # Send data to device
             batch = data_to_cuda(batch)
 
-            if stage == 1:
+            if stage in (0, 1):
                 outputs = model(batch, regression=False)
             else:
                 outputs = model(batch, regression=True)
 
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
-            
+
             ks_loss = outputs.get("ks_loss", torch.tensor(0.0, device=device))
             loss_value = loss.item()
             ks_loss_value = ks_loss.item() if isinstance(ks_loss, torch.Tensor) else float(ks_loss)
 
-           
+            dustbin_loss = torch.tensor(0.0, device=device)
+            ss_db = outputs.get("ds_mat_db")
+            if ss_db is not None:
+                gt_perm = outputs["gt_perm_mat"]
+                n1s, n2s = outputs["ns"]
+                eps = 1e-15
+                n_valid = 0
+                for b in range(ss_db.shape[0]):
+                    n1_b = int(n1s[b])
+                    n2_b = int(n2s[b])
+                    if n1_b == 0 or n2_b == 0:
+                        continue
+                    gt_db_col = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=1)).clamp(0.0, 1.0)
+                    gt_db_row = (1.0 - gt_perm[b, :n1_b, :n2_b].sum(dim=0)).clamp(0.0, 1.0)
+                    pred_db_col = ss_db[b, :n1_b, n2_b].clamp(eps, 1 - eps)
+                    pred_db_row = ss_db[b, n1_b, :n2_b].clamp(eps, 1 - eps)
+                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_col, gt_db_col, reduction='mean')
+                    dustbin_loss = dustbin_loss + F.binary_cross_entropy(pred_db_row, gt_db_row, reduction='mean')
+                    n_valid += 1
+                if n_valid > 0:
+                    dustbin_loss = dustbin_loss / n_valid
+
             total_loss = compose_total_loss(
                 loss,
                 ks_loss,
+                dustbin_loss=dustbin_loss,
                 stage=stage,
             )
             total_loss_value = float(total_loss.item())
@@ -146,7 +169,7 @@ def test_evaluation(model, dataloader, criterion, device, writer, epoch, stage=N
             batch = data_to_cuda(batch)
             if stage is not None:
                 batch["stage_id"] = int(stage)
-            outputs = model(batch, regression=(stage != 1))
+            outputs = model(batch, regression=(stage not in (0, 1)))
             strip_dustbin_from_outputs(outputs)
             loss = criterion(outputs["ds_mat"], outputs["gt_perm_mat"], *outputs["ns"])
             batch_counts = batch_match_counts(outputs)

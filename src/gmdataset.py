@@ -43,7 +43,7 @@ MAX_PROB_SIZE=-1
 TYPE = '2GM'
 FP16 = False
 RANDOM_SEED=145
-DATALOADER_NUM=2  
+DATALOADER_NUM=4
 
 class GMDataset(Dataset):
     def __init__(self, name, bm, length, using_all_graphs=False, cls=None, problem='2GM', augment=None, has_dustbin: bool = True, univ_size: int = UNIV_SIZE):
@@ -445,9 +445,12 @@ def worker_init_rand(worker_id):
     np.random.seed(torch.initial_seed() % 2 ** 32)
 
 
-def get_dataloader(dataset, batch_size, fix_seed=True, shuffle=False, has_dustbin: bool = True):
+def get_dataloader(dataset, batch_size, fix_seed=True, shuffle=False, has_dustbin: bool = True, sampler=None):
+    if sampler is not None:
+        shuffle = False
     return torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=DATALOADER_NUM,
         collate_fn=partial(collate_fn, has_dustbin=has_dustbin),
-        pin_memory=False, worker_init_fn=worker_init_fix if fix_seed else worker_init_rand
+        pin_memory=False, worker_init_fn=worker_init_fix if fix_seed else worker_init_rand,
+        sampler=sampler, persistent_workers=DATALOADER_NUM > 0,
     )

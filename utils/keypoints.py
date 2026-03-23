@@ -24,7 +24,7 @@ def map_keypoints(kp: tuple) -> str:
 
 
 
-def subject_pore_labels(subject_dict, max_sq_alignment_error: float = 25.0):
+def subject_pore_labels(subject_dict, max_sq_alignment_error: float =10.0):
     
     uf = UnionFind()
     component_members = {}

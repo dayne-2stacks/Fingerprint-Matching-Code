@@ -24,7 +24,7 @@ def _stage_group_label(stage: int) -> str:
     if stage == 1:
         return "shared_matcher"
     if stage == 2:
-        return "topk"
+        return "dustbin+topk"
     if stage == 3:
         return "dustbin"
     if stage == 4:
@@ -82,13 +82,15 @@ def _collect_param_groups(model):
     }
 
     for name, param in model.named_parameters():
-        if name.startswith(("encoder_k.", "final_row.", "final_col.")):
+        # Strip DDP "module." prefix so name matching works regardless of wrapping.
+        n = name[len("module."):] if name.startswith("module.") else name
+        if n.startswith(("encoder_k.", "final_row.", "final_col.")):
             groups["k_head"].append(param)
-        elif name == "bin_score":
+        elif n == "bin_score":
             groups["dustbin"].append(param)
-        elif name.startswith("node_layers."):
+        elif n.startswith("node_layers."):
             groups["backbone_node"].append(param)
-        elif name.startswith(("edge_layers.", "final_layers.")):
+        elif n.startswith(("edge_layers.", "final_layers.")):
             groups["backbone_edge"].append(param)
         else:
             groups["matcher"].append(param)
@@ -121,12 +123,12 @@ def _configure_stage_trainability(model, stage):
         _set_trainable(groups["k_head"], False)
         _set_trainable(groups["dustbin"], False)
     elif stage == 2:
-        # Stage 2: dustbin only, genuine + imposter pairs.
-        # Matcher/backbone stay frozen so dustbin learns against a stable Sinkhorn.
+        # Stage 2: dustbin + k-head together, genuine + imposter pairs.
+        # Matcher/backbone stay frozen so both modules learn against a stable Sinkhorn.
         _set_trainable(groups["matcher"], False)
         _set_trainable(groups["backbone_node"], False)
         _set_trainable(groups["backbone_edge"], False)
-        _set_trainable(groups["k_head"], False)
+        _set_trainable(groups["k_head"], True)
         _set_trainable(groups["dustbin"], True)
     elif stage == 3:
         # Stage 3: k-regression + dustbin, genuine + imposter pairs.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import datetime
 import logging
 import signal
 from pathlib import Path
@@ -8,6 +9,8 @@ import numpy as np
 import yaml
 import torch
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import json
 import os
 from torch.utils.tensorboard import SummaryWriter
@@ -72,6 +75,8 @@ def _sigterm_handler(signum, frame):
     if state["model"] is None or state["epoch"] is None:
         print("[SIGTERM] No training state to save. Exiting.")
         raise SystemExit(0)
+    if not _is_main:
+        raise SystemExit(0)
 
     epoch = state["epoch"]
     checkpoint_path = state["checkpoint_path"]
@@ -123,6 +128,7 @@ def _parse_args():
     return parser.parse_args()
 
 args = _parse_args()
+print(f"Parsed arguments: {args}")
 start_epoch = float('inf')
 
 # Discover stage configs from --config-dir (sorted so stage1 < stage2 < ...)
@@ -176,6 +182,25 @@ global_defaults_log = {
 }
 print(f"Loaded global defaults: {global_defaults_log}")
 
+# =====================================================
+# DDP Initialization
+# =====================================================
+_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+_is_distributed = _local_rank >= 0
+
+if _is_distributed:
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=2))
+    _world_size = dist.get_world_size()
+    _rank = dist.get_rank()
+    _device = torch.device(f"cuda:{_local_rank}")
+    torch.cuda.set_device(_local_rank)
+else:
+    _rank = 0
+    _world_size = 1
+    _device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+_is_main = (_rank == 0)
+
 
 for file in config_files:
     scheduler = scheduler_k = None
@@ -198,8 +223,8 @@ for file in config_files:
     checkpoint_path = Path(OUTPUT_PATH) / "params"
     checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-    # Create a new writer for this training stage
-    writer = SummaryWriter(log_dir=str(log_dir))
+    # Create a new writer for this training stage (rank 0 only)
+    writer = SummaryWriter(log_dir=str(log_dir)) if _is_main else None
     
     # Hyperparameters from config
     num_iterations = int(stage_cfg["num_iterations"]) if "num_iterations" in stage_cfg else None
@@ -208,17 +233,23 @@ for file in config_files:
     if os.path.exists(start_file):
         with open(start_file, "r") as f:
             start_data = json.load(f)
+            if start_data.get("completed_stage", -1) >= stage:
+                print(f"Stage {stage} already complete, skipping.")
+                continue
             start_epoch = start_data.get("start_epoch", 0)
             end_epoch = start_data.get("end_epoch", start_epoch + num_epochs)
             resume_best_loss = float(start_data.get("best_loss", float("inf")))
             resume_no_improvement = int(start_data.get("no_improvement_count", 0))
-            print(f"Resuming training from epoch {start_epoch}, end epoch {end_epoch}, "
-                  f"best_loss={resume_best_loss:.4f}, no_improvement={resume_no_improvement}")
+            resume_start_batch = int(start_data.get("start_batch", 0))
+            print(f"Resuming training from epoch {start_epoch}, batch {resume_start_batch}, "
+                  f"end epoch {end_epoch}, best_loss={resume_best_loss:.4f}, "
+                  f"no_improvement={resume_no_improvement}")
     else:
         start_epoch = int(stage_cfg["start_epoch"])
         end_epoch = start_epoch + num_epochs
         resume_best_loss = float("inf")
         resume_no_improvement = 0
+        resume_start_batch = 0
 
     if start_epoch >= end_epoch:
         print(f"Stage {stage} already complete (epoch {start_epoch}/{end_epoch}), skipping.")
@@ -240,6 +271,7 @@ for file in config_files:
     DUSTBIN_REJECT_ENABLE = bool(stage_cfg["DUSTBIN_REJECT_ENABLE"])
     DETECT_ANOMALY = bool(stage_cfg["DETECT_ANOMALY"])
     FOCAL_GAMMA = float(stage_cfg.get("FOCAL_GAMMA", 1.0))
+    FOCAL_ALPHA = float(stage_cfg.get("FOCAL_ALPHA", 0.9))
 
 
     print("BACKBONE_LR =", BACKBONE_LR)
@@ -266,7 +298,7 @@ for file in config_files:
     # Setup Logging
     # =====================================================
     logging.basicConfig(
-        filename='fp.log', 
+        filename=f'fp.log' if _is_main else os.devnull,
         level=logging.DEBUG
     )
     logger = logging.getLogger(__name__)
@@ -277,7 +309,8 @@ for file in config_files:
     # =====================================================
     # Dataset and Dataloader
     # =====================================================
-    dataloader, val_dataloader, test_dataloader = build_dataloaders(
+    print("Building dataloaders...")
+    dataloader, val_dataloader, test_dataloader, train_sampler = build_dataloaders(
         train_root,
         dataset_len,
         batch_size=BATCH_SIZE,
@@ -287,6 +320,8 @@ for file in config_files:
         stage=stage,
         has_dustbin=DUSTBIN_REJECT_ENABLE,
         univ_size=univ_size,
+        rank=_rank,
+        world_size=_world_size,
     )
     # =====================================================
     # Model, Loss, and Device Setup
@@ -299,13 +334,12 @@ for file in config_files:
     elif PERM_LOSS == "perm":
         criterion = PermutationLoss()
     else:
-        criterion = FocalLoss(gamma=FOCAL_GAMMA)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        criterion = FocalLoss(gamma=FOCAL_GAMMA, alpha=FOCAL_ALPHA)
+    device = _device
     model.to(device)
-    
-    # Uncomment below if using multiple GPUs:
-    # model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
-    # model, optimizer = amp.initialize(model, optimizer)
+
+    if _is_distributed:
+        model = DDP(model, device_ids=[_local_rank], find_unused_parameters=True, broadcast_buffers=False)
 
     # =====================================================
     # Stage-wise progressive unfreezing
@@ -316,7 +350,7 @@ for file in config_files:
     stage_messages = {
         0: "Stage 0: matcher warmup only (backbone/k/dustbin frozen; genuine pairs only).",
         1: "Stage 1: matcher + backbone (k/dustbin frozen; genuine pairs only).",
-        2: "Stage 2: dustbin only (matcher/backbone/k frozen; genuine + imposter pairs).",
+        2: "Stage 2 (dustbin+topk): dustbin + k-head (matcher/backbone frozen; genuine + imposter pairs).",
         3: "Stage 3: k-regression + dustbin (matcher/backbone frozen; genuine + imposter pairs).",
         4: "Stage 4: joint fine-tuning (all modules active; genuine + imposter pairs).",
     }
@@ -390,6 +424,25 @@ for file in config_files:
         print(f"Restoring scheduler_k state from {sched_k_path}")
         scheduler_k.load_state_dict(torch.load(str(sched_k_path), map_location="cpu"))
 
+    # Load mid-epoch checkpoint if training was interrupted mid-epoch
+    mid_epoch_path = checkpoint_path / "mid_epoch.pt"
+    if mid_epoch_path.exists():
+        mid = torch.load(str(mid_epoch_path), map_location="cpu")
+        if mid["epoch"] == start_epoch:
+            print(f"Resuming mid-epoch checkpoint: epoch {mid['epoch']}, batch {mid['batch']}")
+            from torch.nn.parallel import DistributedDataParallel
+            from torch.nn import DataParallel
+            m = model.module if isinstance(model, (DataParallel, DistributedDataParallel)) else model
+            m.load_state_dict(mid["model"])
+            optimizer.load_state_dict(mid["optimizer"])
+            if optimizer_k is not None and mid["optimizer_k"] is not None:
+                optimizer_k.load_state_dict(mid["optimizer_k"])
+            resume_start_batch = mid["batch"]
+        else:
+            print(f"Stale mid-epoch checkpoint (epoch {mid['epoch']} != {start_epoch}), ignoring.")
+            if _is_main:
+                mid_epoch_path.unlink()
+
     # WarmupScheduler already applies the initial warmup step when it is created.
     # Avoid manually scaling LRs here, or the first-epoch LR is reduced twice.
     print("Warmup schedulers initialized; keeping scheduler-managed starting learning rates.")
@@ -402,43 +455,52 @@ for file in config_files:
                 
     
     last_epoch = 0
+    start_batch = resume_start_batch
     # =====================================================
     # Training Loop
     # =====================================================
     for epoch in range(start_epoch, end_epoch):
-        logger.info(f"Epoch {epoch}/{end_epoch - 1}")
-        logger.info("-" * 50)
-        print("Epoch {}/{}".format(epoch, end_epoch - 1))
-        print("-" * 10)
+        if _is_main:
+            logger.info(f"Epoch {epoch}/{end_epoch - 1}")
+            logger.info("-" * 50)
+            print("Epoch {}/{}".format(epoch, end_epoch - 1))
+            print("-" * 10)
 
-        _sigterm_state.update({
-            "model": model,
-            "optimizer": optimizer,
-            "optimizer_k": optimizer_k,
-            "scheduler": scheduler,
-            "scheduler_k": scheduler_k,
-            "checkpoint_path": checkpoint_path,
-            "start_file": start_file,
-            "epoch": epoch,
-            "end_epoch": end_epoch,
-            "best_loss": best_loss,
-            "no_improvement_count": no_improvement_count,
-        })
+        if _is_main:
+            _sigterm_state.update({
+                "model": model,
+                "optimizer": optimizer,
+                "optimizer_k": optimizer_k,
+                "scheduler": scheduler,
+                "scheduler_k": scheduler_k,
+                "checkpoint_path": checkpoint_path,
+                "start_file": start_file,
+                "epoch": epoch,
+                "end_epoch": end_epoch,
+                "best_loss": best_loss,
+                "no_improvement_count": no_improvement_count,
+            })
+
+        # Notify sampler of current epoch for proper shuffling across ranks
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
 
         model.train()
         if stage in (2, 3):
             # Backbone is frozen in these stages — keep BN running stats fixed.
             model.apply(_set_batchnorm_eval)
-        print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
-        if optimizer_k is not None:
-            print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))
 
-        for i, param_group in enumerate(optimizer.param_groups):
-            writer.add_scalar(f'Learning_Rate/group_{i}', param_group['lr'], epoch)
+        if _is_main:
+            print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
+            if optimizer_k is not None:
+                print("K_regression_lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer_k.param_groups]))
 
-        if optimizer_k is not None:
-            for i, param_group in enumerate(optimizer_k.param_groups):
-                writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
+            for i, param_group in enumerate(optimizer.param_groups):
+                writer.add_scalar(f'Learning_Rate/group_{i}', param_group['lr'], epoch)
+
+            if optimizer_k is not None:
+                for i, param_group in enumerate(optimizer_k.param_groups):
+                    writer.add_scalar(f'Learning_Rate_K/group_{i}', param_group['lr'], epoch)
 
 
         # Train for one epoch
@@ -457,54 +519,80 @@ for file in config_files:
             checkpoint_path,
             detect_anomaly=DETECT_ANOMALY,
             max_iters=num_iterations,
+            is_main=_is_main,
+            start_batch=start_batch,
         )
-            
-        # =====================================================
-        # ---- Validation after each epoch ----
-        # =====================================================
-        avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy = validate_epoch(
-            model,
-            val_dataloader,
-            criterion,
-            device,
-            writer,
-            epoch,
-            logger,
-            stage,
-        )
-    
-        
-        # Save best model based on validation loss and update checkpoint file
-        if avg_val_total < best_loss:
-            best_loss = avg_val_total
-            no_improvement_count = 0
-            best_model_path = str(checkpoint_path / "best_model.pt")
-            save_model(model, best_model_path)
-            torch.save(scheduler.state_dict(), str(checkpoint_path / "scheduler.pt"))
-            if scheduler_k is not None:
-                torch.save(scheduler_k.state_dict(), str(checkpoint_path / "scheduler_k.pt"))
-            with open(start_file, "w") as f:
-                json.dump({
-                    "start_epoch": epoch + 1,
-                    "end_epoch": end_epoch,
-                    "best_loss": best_loss,
-                    "no_improvement_count": no_improvement_count,
-                }, f)
-        else:
-            no_improvement_count += 1
-            print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(no_improvement_count, best_loss))
-            with open(start_file, "w") as f:
-                json.dump({
-                    "start_epoch": epoch + 1,
-                    "end_epoch": end_epoch,
-                    "best_loss": best_loss,
-                    "no_improvement_count": no_improvement_count,
-                }, f)
-            if no_improvement_count >= patience:
-                print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
-                break
+        start_batch = 0  # only skip batches on the first /resumed epoch
 
-        
+        # Barrier: ensure all ranks finish training before rank 0 validates/saves
+        if _is_distributed:
+            dist.barrier()
+
+        # =====================================================
+        # ---- Validation after each epoch (rank 0 only) ----
+        # =====================================================
+        should_stop = torch.zeros(1, dtype=torch.bool, device=device)
+        avg_val_loss = avg_ks_loss  # fallback values for non-main ranks
+        avg_val_total = avg_total_loss
+
+        if _is_main:
+            try:
+                avg_val_loss, avg_ks_loss, avg_val_total, avg_val_accuracy = validate_epoch(
+                    model,
+                    val_dataloader,
+                    criterion,
+                    device,
+                    writer,
+                    epoch,
+                    logger,
+                    stage,
+                )
+
+                # Save best model based on validation loss and update checkpoint file
+                if avg_val_total < best_loss:
+                    best_loss = avg_val_total
+                    no_improvement_count = 0
+                    best_model_path = str(checkpoint_path / "best_model.pt")
+                    save_model(model, best_model_path)
+                    torch.save(scheduler.state_dict(), str(checkpoint_path / "scheduler.pt"))
+                    if scheduler_k is not None:
+                        torch.save(scheduler_k.state_dict(), str(checkpoint_path / "scheduler_k.pt"))
+                    with open(start_file, "w") as f:
+                        json.dump({
+                            "start_epoch": epoch + 1,
+                            "end_epoch": end_epoch,
+                            "best_loss": best_loss,
+                            "no_improvement_count": no_improvement_count,
+                        }, f)
+                else:
+                    no_improvement_count += 1
+                    print("No improvement for {} epoch(s). Best loss so far: {:.4f}".format(no_improvement_count, best_loss))
+                    with open(start_file, "w") as f:
+                        json.dump({
+                            "start_epoch": epoch + 1,
+                            "end_epoch": end_epoch,
+                            "best_loss": best_loss,
+                            "no_improvement_count": no_improvement_count,
+                        }, f)
+                    if no_improvement_count >= patience:
+                        print("Stopping early at epoch {} due to no improvement.".format(epoch + 1))
+                        should_stop[0] = True
+                        with open(start_file, "w") as f:
+                            json.dump({
+                                "completed_stage": stage,
+                                "start_epoch": epoch + 1,
+                                "end_epoch": end_epoch,
+                                "best_loss": best_loss,
+                                "no_improvement_count": no_improvement_count,
+                            }, f)
+            except Exception as e:
+                print(f"[WARN] Rank 0 validation/checkpoint error (epoch {epoch}): {e}. Continuing to broadcast.")
+
+        # Broadcast early-stopping decision from rank 0 to all other ranks
+        if _is_distributed:
+            dist.broadcast(should_stop, src=0)
+        if should_stop.item():
+            break
 
         # Initialize previous learning rates on first epoch
         if epoch == start_epoch:
@@ -514,52 +602,63 @@ for file in config_files:
 
         # Step LR schedulers
         if stage == 2:
-            scheduler.step(avg_ks_loss)
-            # scheduler.step()
+            scheduler.step(avg_val_total)
         elif stage == 3:
             scheduler.step(avg_val_total)
-            # scheduler.step()
-
         else:
             scheduler.step(avg_val_loss)
-            # scheduler.step()
 
         if optimizer_k is not None:
-            # scheduler_k.step()
-            scheduler_k.step(avg_ks_loss)   
-
+            scheduler_k.step(avg_ks_loss)
 
         # Detect LR reduction for main optimizer
         curr_lr = [group['lr'] for group in optimizer.param_groups]
         lr_reduced = any(clr < plr for clr, plr in zip(curr_lr, prev_lr))
         prev_lr = curr_lr  # Update previous for next iteration
 
-        # if lr_reduced:
-        #     print("[LR REDUCED] Reloading best model weights from", checkpoint_path / "best_model.pt")
-        #     best_model_path = str(checkpoint_path / "best_model.pt")
-        #     load_model(model, best_model_path)
-
         last_epoch = epoch
-            
-       
-        
-    # ---- Test Evaluation Periodically ----
-    test_evaluation(
-        model,
-        test_dataloader,
-        criterion,
-        device,
-        writer,
-        last_epoch,
-        stage,
-    )
-    
-    # Close the TensorBoard writer at the end of this training stage
-    writer.close()
+
+
+
+    # Mark stage complete so restarts skip it
+    if _is_main and os.path.exists(start_file):
+        with open(start_file, "r") as f:
+            _sd = json.load(f)
+        _sd["completed_stage"] = stage
+        with open(start_file, "w") as f:
+            json.dump(_sd, f)
+
+    # Sync all ranks before test evaluation so rank 1 doesn't race ahead to the next stage
+    if _is_distributed:
+        dist.barrier()
+
+    # ---- Test Evaluation (rank 0 only) ----
+    if _is_main:
+        test_evaluation(
+            model,
+            test_dataloader,
+            criterion,
+            device,
+            writer,
+            last_epoch,
+            stage,
+        )
+
+        # Close the TensorBoard writer at the end of this training stage
+        writer.close()
+
+    # Sync all ranks after test evaluation before proceeding to the next stage
+    if _is_distributed:
+        dist.barrier()
 
 # =====================================================
-# Load Best Model and Evaluate on a Sample
+# Load Best Model and Evaluate on a Sample (rank 0 only)
 # =====================================================
+if not _is_main:
+    if _is_distributed:
+        dist.destroy_process_group()
+    raise SystemExit(0)
+
 single_sample = next(iter(val_dataloader))
 single_sample = data_to_cuda(single_sample)
 print(single_sample.keys())
@@ -650,3 +749,6 @@ writer.add_scalar('Final/Accuracy', acc, 0)
 writer.close()
 
 print("Accuracy: ", acc)
+
+if _is_distributed:
+    dist.destroy_process_group()

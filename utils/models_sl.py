@@ -1,16 +1,17 @@
 import torch
 from torch.nn import DataParallel
+from torch.nn.parallel import DistributedDataParallel
 
 
 def save_model(model, path):
-    if isinstance(model, DataParallel):
+    if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
     torch.save(model.state_dict(), path)
 
 
 def load_model(model, path, strict=False):
-    if isinstance(model, DataParallel):
+    if isinstance(model, (DataParallel, DistributedDataParallel)):
         module = model.module
     else:
         module = model

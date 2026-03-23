@@ -16,8 +16,8 @@ def compose_total_loss(
         # Genuine only: permutation loss only; k and dustbin are frozen.
         return primary_loss
     elif stage == 2:
-        # Dustbin warmup: only dustbin loss; matcher/k frozen.
-        return dustbin_loss
+        # Dustbin + topk: both dustbin and k-regression loss; matcher/backbone frozen.
+        return ks_loss + dustbin_loss
     elif stage == 3:
         # k-regression + dustbin: no permutation loss so matcher stays stable.
         return ks_loss + dustbin_loss
